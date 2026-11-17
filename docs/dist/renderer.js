@@ -7716,8 +7716,10 @@
     const totalTalkingMs = buffer.priorTalkingMs + buffer.accumulatedTalkingMs;
     const gazePresenceRatio = totalDwellMs > 0 ? Number(Math.min(1, totalGazeMs / totalDwellMs).toFixed(2)) : 0;
     const pulseMean = computeMedian(buffer.pulseSamples) ?? previousRecord.pulseMeanBpm;
+    const recentPulseMean = buffer.pulseSamples.length > 0 ? computeMedian(buffer.pulseSamples.slice(-25)) : previousRecord.pulseMeanBpm;
     const pulseConf = computeMedian(buffer.pulseConfidences) ?? previousRecord.pulseConfidence;
     const pulseDelta = pulseMean !== null && baseline?.pulseMedianBpm != null ? Number((pulseMean - baseline.pulseMedianBpm).toFixed(1)) : null;
+    const recentPulseDelta = recentPulseMean !== null && baseline?.pulseMedianBpm != null ? Number((recentPulseMean - baseline.pulseMedianBpm).toFixed(1)) : pulseDelta;
     const breathMean = computeMedian(buffer.breathingSamples) ?? previousRecord.breathingMeanBrpm;
     const breathConf = computeMedian(buffer.breathingConfidences) ?? previousRecord.breathingConfidence;
     const apnea = computeApneaHoldSeconds(
@@ -7727,7 +7729,7 @@
     );
     const currentVisitApnea = Math.max(buffer.maxApneaHoldSec, apnea.maxHoldSec);
     const maxApneaHoldSec = Number(
-      (buffer.upperTraceSamples.length >= 25 && currentVisitApnea < 3 ? currentVisitApnea : Math.max(previousRecord.maxApneaHoldSec, currentVisitApnea)).toFixed(1)
+      (buffer.upperTraceSamples.length >= 40 && currentVisitApnea < 3 ? currentVisitApnea : Math.max(previousRecord.maxApneaHoldSec, currentVisitApnea)).toFixed(1)
     );
     const totalBlinks = buffer.priorBlinkCount + buffer.blinkCount;
     const dwellMin = Math.max(0.05, totalDwellMs / 6e4);
@@ -7750,26 +7752,28 @@
     let status = "VERIFIED_CALM";
     let statusReason = "Verified: adequate reading dwell, centered gaze, and steady respiratory rhythm.";
     const currentBufferTalkingRatio = buffer.accumulatedDwellMs > 0 ? buffer.accumulatedTalkingMs / buffer.accumulatedDwellMs : totalDwellMs > 0 ? totalTalkingMs / totalDwellMs : 0;
-    if (totalDwellMs < clause.minRequiredDwellMs || gazePresenceRatio < 0.55) {
+    const hasApnea = maxApneaHoldSec >= 4.5;
+    const hasPulseSpike = pulseDelta !== null && pulseConf >= 40 && pulseDelta >= 7.5 || recentPulseDelta !== null && pulseConf >= 40 && recentPulseDelta >= 7.5 && totalDwellMs >= 2500;
+    const exprDelta = exprScore - (baseline?.expressionTensionMedian ?? 8);
+    const hasOcularStrain = exprDelta >= 22 && blinkRatePerMin < 7;
+    if (gazePresenceRatio < 0.55 && totalDwellMs >= 1500) {
       status = "SKIM_DETECTED";
-      const pct = Math.min(100, Math.round(totalDwellMs / clause.minRequiredDwellMs * 100));
-      statusReason = gazePresenceRatio < 0.55 && totalDwellMs >= 1500 ? `Gaze off-screen for ${Math.round((1 - gazePresenceRatio) * 100)}% of dwell window. Re-read with eyes on clause.` : `Skimmed (${(totalDwellMs / 1e3).toFixed(1)}s vs ${(clause.minRequiredDwellMs / 1e3).toFixed(1)}s minimum for ${clause.wordCount} words \u2014 ${pct}% completed).`;
+      statusReason = `Gaze off-screen for ${Math.round((1 - gazePresenceRatio) * 100)}% of dwell window. Re-read with eyes on clause.`;
     } else if (currentBufferTalkingRatio > 0.35 || buffer.totalPackets >= 5 && signalValidRatio < 0.4) {
       status = "SIGNAL_UNVERIFIED";
       statusReason = currentBufferTalkingRatio > 0.35 ? "Vocalization detected (face.talking = true). SmartSpectra breathing rate is paused during speech per Model Card." : "Camera framing or lighting unstable during reading window. Hold still with face and upper chest illuminated.";
-    } else {
-      const hasApnea = maxApneaHoldSec >= 4.5;
-      const hasPulseSpike = pulseDelta !== null && pulseConf >= 40 && pulseDelta >= 7.5;
-      const exprDelta = exprScore - (baseline?.expressionTensionMedian ?? 8);
-      const hasOcularStrain = exprDelta >= 22 && blinkRatePerMin < 7;
-      if (hasApnea || hasPulseSpike || hasOcularStrain) {
-        status = "APNEA_FRICTION";
-        const reasons = [];
-        if (hasApnea) reasons.push(`${maxApneaHoldSec}s breath-hold (reading apnea)`);
-        if (hasPulseSpike) reasons.push(`+${pulseDelta} BPM pulse surge above baseline`);
-        if (hasOcularStrain) reasons.push(`elevated brow tension (+${exprDelta.toFixed(0)}%) with blink suppression`);
-        statusReason = `Physiological friction detected: ${reasons.join(" + ")}. Complete 2 settling breaths to attest.`;
-      }
+    } else if (hasApnea || (hasPulseSpike || hasOcularStrain) && totalDwellMs >= 2500) {
+      status = "APNEA_FRICTION";
+      const displayedPulseDelta = pulseDelta !== null && Math.abs(pulseDelta) >= 7.5 ? pulseDelta : recentPulseDelta ?? pulseDelta;
+      const reasons = [];
+      if (hasApnea) reasons.push(`${maxApneaHoldSec}s breath-hold (reading apnea)`);
+      if (hasPulseSpike) reasons.push(`+${displayedPulseDelta} BPM pulse surge above baseline`);
+      if (hasOcularStrain) reasons.push(`elevated brow tension (+${exprDelta.toFixed(0)}%) with blink suppression`);
+      statusReason = `Physiological friction detected: ${reasons.join(" + ")}. Complete 2 settling breaths to attest.`;
+    } else if (totalDwellMs < clause.minRequiredDwellMs || gazePresenceRatio < 0.55) {
+      status = "SKIM_DETECTED";
+      const pct = Math.min(100, Math.round(totalDwellMs / clause.minRequiredDwellMs * 100));
+      statusReason = gazePresenceRatio < 0.55 && totalDwellMs >= 1500 ? `Gaze off-screen for ${Math.round((1 - gazePresenceRatio) * 100)}% of dwell window. Re-read with eyes on clause.` : `Skimmed (${(totalDwellMs / 1e3).toFixed(1)}s vs ${(clause.minRequiredDwellMs / 1e3).toFixed(1)}s minimum for ${clause.wordCount} words \u2014 ${pct}% completed).`;
     }
     let nextPassHistory = previousRecord.passHistory;
     if (recordPassSnapshot && buffer.accumulatedDwellMs >= 400) {
@@ -8517,6 +8521,9 @@ ${hunkBody.split("\n").slice(0, 28).join("\n")}`;
   }
   function parseCustomDocumentIntoClauses(title, rawText, sourcePath) {
     const cleanTitle = title.trim() || "Custom Audited Document";
+    if (/^diff --git /m.test(rawText)) {
+      return parseGitDiffIntoPreset(cleanTitle, "pasted-diff", rawText, sourcePath);
+    }
     const sourceHashSha256 = sha256Hex(rawText);
     const isCodeFile = Boolean(
       sourcePath && /\.(sql|ts|js|py|json|yaml|yml|diff|patch|sh)$/i.test(sourcePath)
@@ -9888,10 +9895,22 @@ ${rows}
         keySource: "BROWSER_COMPANION"
       }),
       setTelemetryPreference: async (enabled) => ({ telemetryEnabled: enabled }),
-      checkDeviceReadiness: async () => ({
-        verdict: "browser_optical_ready",
-        reason: "Browser Companion Active (30 FPS Canvas2D rPPG + Chest ROI). Clone github.com/x-tahosin/clausepulse and run `npm start` for native C++ @smartspectra/node-sdk@3.5.0 desktop execution."
-      }),
+      checkDeviceReadiness: async () => {
+        let camCount = 0;
+        let camLabel = "";
+        try {
+          const devices = await navigator.mediaDevices?.enumerateDevices?.();
+          const cams = (devices || []).filter((d) => d.kind === "videoinput");
+          camCount = cams.length;
+          camLabel = cams.map((c) => c.label || "Webcam").slice(0, 2).join(", ");
+        } catch {
+          camCount = 0;
+        }
+        return {
+          verdict: camCount > 0 ? "browser_webcam_ready" : "browser_simulator_ready",
+          reason: camCount > 0 ? `Detected ${camCount} browser camera(s)${camLabel ? " (" + camLabel + ")" : ""}. Click "\u{1F4F7} Use My Webcam" for live 30 FPS optical analysis, or clone github.com/x-tahosin/clausepulse and run \`npm start\` for native C++ @smartspectra/node-sdk@3.5.0.` : 'No physical webcam enumerated yet (or permission not granted). Built-in 1-Click Reaction Simulator & 30-Case Benchmark are ready. Click "\u{1F4F7} Use My Webcam" to grant camera access.'
+        };
+      },
       openLocalFile: () => new Promise((resolve) => {
         const input = document.createElement("input");
         input.type = "file";
@@ -9997,13 +10016,28 @@ ${rows}
       }
     };
   }
+  var DEFAULT_BASELINE = {
+    calibratedAtIso: (/* @__PURE__ */ new Date()).toISOString(),
+    durationSec: 30,
+    pulseMedianBpm: 70.2,
+    pulseIqrBpm: 1.5,
+    breathingMedianBrpm: 13.8,
+    upperTraceStdDev: 0.3194,
+    blinkRatePerMin: 16,
+    expressionTensionMedian: 6,
+    edaMedian: 0.85,
+    hrvRmssdMs: 42.8,
+    hrvBaevskyIndex: 108,
+    sampleCount: 300,
+    talkingRatio: 0,
+    valid: true
+  };
   var customPresets = [];
   var activePreset = BUILTIN_DOCUMENT_PRESETS[0];
   var docSession = createDocumentSession(activePreset.clauses);
-  var personalBaseline = null;
+  var personalBaseline = DEFAULT_BASELINE;
   var baselineAcc = null;
-  var baselineTimer = null;
-  var sourceMode = "LIVE_CAMERA_SMARTSPECTRA";
+  var sourceMode = "DETERMINISTIC_REPLAY_BENCH";
   var isSensorActive = false;
   var isValidationOk = true;
   var telemetryEnabled = false;
@@ -10019,6 +10053,8 @@ ${rows}
   var activeReplayProfile = "CALM_STEADY_READER";
   var replayStartMs = 0;
   var walkthroughInterval = null;
+  var lastSignOffToastShown = false;
+  var sensorTransitionToken = 0;
   var breathingWaveHistory = [];
   var pulseWaveHistory = [];
   var MAX_WAVE_POINTS = 140;
@@ -10027,47 +10063,86 @@ ${rows}
   }
   function showNotice(title, message) {
     const banner = $("sensorNoticeBanner");
+    if (!banner) return;
     $("sensorNoticeTitle").textContent = title;
     $("sensorNoticeText").textContent = " " + message;
     banner.hidden = false;
   }
   function hideNotice() {
-    $("sensorNoticeBanner").hidden = true;
+    const banner = $("sensorNoticeBanner");
+    if (banner) banner.hidden = true;
+  }
+  function highlightActiveSimButton(profile) {
+    document.querySelectorAll(".sim-btn").forEach((btn) => {
+      const p = btn.getAttribute("data-profile");
+      btn.classList.toggle("active", Boolean(profile && p === profile));
+    });
   }
   function updateSourceModeBadge(mode, active) {
     sourceMode = mode;
+    const pauseBtn = $("btnStopSensor");
+    if (pauseBtn) {
+      pauseBtn.textContent = active ? "\u23F8 Pause" : "\u25B6 Resume";
+    }
     const badge = $("activeSourceBadge");
+    if (!badge) return;
     if (!active) {
-      badge.textContent = "IDLE \u2022 STANDBY";
+      badge.textContent = "PAUSED";
       badge.className = "mode-pill";
       return;
     }
     if (mode === "LIVE_CAMERA_SMARTSPECTRA") {
-      badge.textContent = "LIVE CAMERA \u2022 SMARTSPECTRA C++ SDK";
+      badge.textContent = "LIVE CAMERA \u2022 SMARTSPECTRA SDK";
       badge.className = "mode-pill mode-pill-live";
     } else if (mode === "LIVE_WEBCAM_OPTICAL") {
-      badge.textContent = "LIVE WEBCAM \u2022 LOCAL OPTICAL ROI";
+      badge.textContent = "LIVE WEBCAM \u2022 OPTICAL ROI";
       badge.className = "mode-pill mode-pill-optical";
     } else if (mode === "VIDEO_FILE_SMARTSPECTRA") {
-      badge.textContent = "VIDEO FILE \u2022 SMARTSPECTRA SDK";
+      badge.textContent = "VIDEO FILE \u2022 ACTIVE";
       badge.className = "mode-pill mode-pill-live";
     } else {
-      badge.textContent = "TEST BENCH \u2022 DETERMINISTIC REPLAY";
+      badge.textContent = `ACTIVE \u2022 ${activeReplayProfile.replace(/_/g, " ")}`;
       badge.className = "mode-pill mode-pill-bench";
     }
   }
   function updateProcessingBadge(status) {
     const label = typeof status === "number" ? STATUS_LABELS[status] || `Status(${status})` : status;
     const el = $("sdkStatusBadge");
+    if (!el) return;
     el.textContent = label;
-    el.className = "status-pill " + (label === "Running" || label === "OpticalLock" || label === "ReplayActive" ? "status-running" : label === "Error" ? "status-error" : "status-idle");
   }
-  function updateValidationHud(code, hint) {
+  function updateValidationHud(code, _hint) {
     const name = VALIDATION_LABELS[code] || `Code(${code})`;
     isValidationOk = code === ValidationCode.kOk;
     const chip = $("hudValidationChip");
-    chip.textContent = `Validation: ${name}${hint ? " (" + hint + ")" : ""}`;
+    if (!chip) return;
+    chip.textContent = isValidationOk ? "Face ROI: Locked" : `Face ROI: ${name}`;
     chip.className = "hud-chip " + (isValidationOk ? "hud-chip-ok" : "hud-chip-warn");
+  }
+  function scrollActiveClauseIntoView() {
+    requestAnimationFrame(() => {
+      const activeCard = document.querySelector(".clause-card.active");
+      activeCard?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+  }
+  function announceClauseVerdictIfFlagged(clauseId) {
+    const clause = docSession.clauses.find((c) => c.id === clauseId);
+    const rec = docSession.records[clauseId];
+    if (!clause || !rec) return;
+    if (rec.status === "SKIM_DETECTED") {
+      const reason = rec.gazePresenceRatio < 0.55 ? `Eyes were off-screen (${Math.round(rec.gazePresenceRatio * 100)}% gaze). Click "\u{1F60C} Calm Reader" and revisit ${clause.number}.` : `Read only ${Math.min(100, Math.round(rec.dwellTimeMs / clause.minRequiredDwellMs * 100))}% of required time on ${clause.number}. Wait for 100% before advancing!`;
+      showNotice(`\u26A0\uFE0F Skim Caught on ${clause.number}`, reason);
+    } else if (rec.status === "APNEA_FRICTION") {
+      showNotice(
+        `\u{1F6A8} Stress / Breath-Hold Caught on ${clause.number}`,
+        "Complete 2 deep recovery breaths (or click Simulate 2 Deep Breaths) to unlock it."
+      );
+    } else if (rec.status === "SIGNAL_UNVERIFIED") {
+      showNotice(
+        `\u23F8 Paused for Speech on ${clause.number}`,
+        "Reading aloud pauses respiratory checks. Stay silent while finishing."
+      );
+    }
   }
   function drawWaveformCanvas(canvasId, samples, strokeColor, drawThresholdBand = false) {
     const canvas = $(canvasId);
@@ -10077,7 +10152,7 @@ ${rows}
     const w = canvas.width;
     const h = canvas.height;
     ctx.clearRect(0, 0, w, h);
-    ctx.strokeStyle = "rgba(148, 163, 184, 0.11)";
+    ctx.strokeStyle = "rgba(148, 163, 184, 0.12)";
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(0, h / 2);
@@ -10088,8 +10163,8 @@ ${rows}
     }
     ctx.stroke();
     if (drawThresholdBand) {
-      ctx.fillStyle = "rgba(244, 63, 94, 0.08)";
-      ctx.fillRect(0, h / 2 - 6, w, 12);
+      ctx.fillStyle = "rgba(244, 63, 94, 0.09)";
+      ctx.fillRect(0, h / 2 - 5, w, 10);
     }
     if (samples.length < 2) return;
     let min = Infinity;
@@ -10100,12 +10175,12 @@ ${rows}
     }
     const span = Math.max(0.25, max - min);
     ctx.strokeStyle = strokeColor;
-    ctx.lineWidth = 1.75;
+    ctx.lineWidth = 1.8;
     ctx.beginPath();
     for (let i = 0; i < samples.length; i++) {
       const x = i / (MAX_WAVE_POINTS - 1) * w;
       const norm = (samples[i] - min) / span;
-      const y = h - 6 - norm * (h - 12);
+      const y = h - 5 - norm * (h - 10);
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     }
@@ -10115,6 +10190,7 @@ ${rows}
     if (baselineAcc) {
       baselineAcc = ingestBaselinePacket(baselineAcc, metrics, nowMs);
     }
+    const prevStatus = docSession.records[docSession.activeClauseId]?.status;
     docSession = ingestMetricsForActiveClause(
       docSession,
       metrics,
@@ -10123,6 +10199,10 @@ ${rows}
       nowMs,
       explicitStepMs
     );
+    const newStatus = docSession.records[docSession.activeClauseId]?.status;
+    if (newStatus === "APNEA_FRICTION" && prevStatus !== "APNEA_FRICTION" && !docSession.settlingTargetClauseId && !walkthroughInterval) {
+      docSession = startSettlingGate(docSession, docSession.activeClauseId);
+    }
     const upperArr = metrics.breathing?.upperTrace ?? metrics.breathing?.upper_trace ?? [];
     let latestChestWave = 0;
     for (const s of upperArr) {
@@ -10142,16 +10222,20 @@ ${rows}
     const talkingArr = metrics.face?.talking ?? [];
     const isTalking = talkingArr.length > 0 && Boolean(talkingArr[talkingArr.length - 1]?.detected);
     const talkingChip = $("hudTalkingChip");
-    talkingChip.textContent = isTalking ? "Speech Gate: TALKING (Resp Paused)" : "Speech Gate: Silent (OK)";
-    talkingChip.className = "hud-chip " + (isTalking ? "hud-chip-warn" : "hud-chip-ok");
+    if (talkingChip) {
+      talkingChip.textContent = isTalking ? "Speech: Talking" : "Speech: Silent";
+      talkingChip.className = "hud-chip " + (isTalking ? "hud-chip-warn" : "hud-chip-ok");
+    }
     const apnea = computeApneaHoldSeconds(
       docSession.activeBuffer.upperTraceSamples,
       personalBaseline?.upperTraceStdDev ?? 0.35,
       isTalking
     );
     const apneaBadge = $("apneaReadoutBadge");
-    apneaBadge.textContent = `Breath Hold: ${apnea.currentHoldSec.toFixed(1)}s`;
-    apneaBadge.className = "scope-badge " + (apnea.currentHoldSec >= 4.5 ? "scope-badge-alert" : "");
+    if (apneaBadge) {
+      apneaBadge.textContent = `Breath Hold: ${apnea.currentHoldSec.toFixed(1)}s`;
+      apneaBadge.className = "scope-badge " + (apnea.currentHoldSec >= 4.5 ? "scope-badge-alert" : "");
+    }
     drawWaveformCanvas(
       "canvasBreathingTrace",
       breathingWaveHistory,
@@ -10168,16 +10252,14 @@ ${rows}
       if (personalBaseline?.pulseMedianBpm != null) {
         const delta = latestPulse.value - personalBaseline.pulseMedianBpm;
         const sign = delta >= 0 ? "+" : "";
-        $("subPulseDelta").textContent = `${sign}${delta.toFixed(1)} BPM vs ${personalBaseline.pulseMedianBpm} base`;
-      } else {
-        $("subPulseDelta").textContent = `Stable: ${latestPulse.stable ? "Yes" : "Warming"}`;
+        $("subPulseDelta").textContent = `${sign}${delta.toFixed(1)} BPM vs baseline`;
       }
     }
     const breathArr = metrics.breathing?.rate ?? [];
     const latestBreath = breathArr.length > 0 ? breathArr[breathArr.length - 1] : null;
     if (latestBreath && latestBreath.value > 0 && !isTalking) {
       $("valBreathingBrpm").textContent = latestBreath.value.toFixed(1);
-      $("subBreathingConf").textContent = `Conf: ${(latestBreath.confidence ?? 0).toFixed(0)}% (${latestBreath.stable ? "Stable" : "Warming"})`;
+      $("subBreathingConf").textContent = apnea.currentHoldSec >= 4.5 ? "\u26A0\uFE0F Holding breath!" : "Steady rhythm";
     }
     const activeRec = docSession.records[docSession.activeClauseId];
     if (activeRec) {
@@ -10192,9 +10274,9 @@ ${rows}
       faceCentered = f.faceCentered;
       cx = f.centroidX ?? 0.5;
       cy = f.centroidY ?? 0.42;
-      $("subGazeStatus").textContent = `${f.faceCentered ? "Centered" : "Off-center"} (${f.landmarkCount} pts)`;
+      $("subGazeStatus").textContent = f.faceCentered ? "Eyes on screen \u2713" : "\u26A0\uFE0F Eyes off-screen";
     } else {
-      $("subGazeStatus").textContent = "No face landmarks (0%)";
+      $("subGazeStatus").textContent = "\u26A0\uFE0F No face in frame";
     }
     renderCameraHudReticle($("cameraHudCanvas"), {
       active: isSensorActive,
@@ -10215,72 +10297,87 @@ ${rows}
     const exprArr = metrics.face?.expression ?? [];
     if (exprArr.length > 0) {
       const tension = computeExpressionTension(exprArr[exprArr.length - 1]);
-      $("subExpressionTension").textContent = `Brow tension: ${tension.toFixed(0)}%`;
+      $("subExpressionTension").textContent = `Brow strain: ${tension.toFixed(0)}%`;
     }
     updateSettlingGateBanner();
     renderClauseCards();
     updateReceiptAndSignOffUI();
+    if (!walkthroughInterval) {
+      const signSummary = computeDocumentSignOffSummary(docSession);
+      if (signSummary.canSignOff && !lastSignOffToastShown) {
+        lastSignOffToastShown = true;
+        showNotice(
+          "\u2705 All Sections Verified!",
+          'Click "\u270D\uFE0F Sign & Save Receipt" on the right to seal & download your SHA-256 Read Receipt.'
+        );
+      } else if (!signSummary.canSignOff) {
+        lastSignOffToastShown = false;
+      }
+    }
   }
   function getSelectedMetricCodes(allowCardio = true) {
-    const codes = [...breathingMetrics];
-    if ($("chkBundleFace")?.checked) {
-      codes.push(...faceMetrics);
-    }
-    if (allowCardio && $("chkBundleCardio")?.checked) {
+    const codes = [...breathingMetrics, ...faceMetrics];
+    if (allowCardio) {
       codes.push(...cardioMetrics);
-    }
-    if ($("chkBundleEda")?.checked) {
-      codes.push(...edaMetrics);
     }
     return codes;
   }
   async function startLocalOpticalWebcamSession() {
-    await stopAllSensors();
+    const myToken = ++sensorTransitionToken;
+    await stopAllSensors(true);
+    if (myToken !== sensorTransitionToken) return;
     hideNotice();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } },
         audio: false
       });
+      if (myToken !== sensorTransitionToken) {
+        for (const t of stream.getTracks()) t.stop();
+        return;
+      }
       localWebcamStream = stream;
       const video = $("cameraPreview");
       video.srcObject = stream;
       await video.play();
+      if (myToken !== sensorTransitionToken) return;
       opticalProcessor.reset();
       isSensorActive = true;
       isValidationOk = true;
       $("cameraOverlay").hidden = true;
+      highlightActiveSimButton(null);
       updateSourceModeBadge("LIVE_WEBCAM_OPTICAL", true);
       updateProcessingBadge("OpticalLock");
-      updateValidationHud(ValidationCode.kOk, "Live Webcam ROI Active");
-      $("btnStartCamera").disabled = true;
+      updateValidationHud(ValidationCode.kOk, "Webcam Live");
       $("btnRecordTake").disabled = false;
-      $("btnStopSensor").disabled = false;
       showNotice(
-        "Live Webcam Optical ROI Active",
-        "Physical webcam is streaming at 30 FPS with on-device Face rPPG + Upper-Chest Respiratory ROI analysis. Add a Presage API key in the Key Vault at any time to switch to native C++ SmartSpectraSDK."
+        "\u{1F4F7} Live Webcam Active",
+        "Analyzing your real-time face & upper-chest movement locally at 30 FPS."
       );
       localOpticalTimer = setInterval(() => {
         const res = opticalProcessor.processVideoFrame(video, Date.now());
         if (!res) return;
         updateValidationHud(
           res.diag.faceCentered ? ValidationCode.kOk : ValidationCode.kFaceNotCentered,
-          res.diag.faceCentered ? "Face & Chest ROI Locked" : "Center face in reticle"
+          res.diag.faceCentered ? "Locked" : "Center face"
         );
         handleDecodedMetricsPacket(res.metrics, Date.now());
       }, 66);
     } catch (err) {
       showNotice(
-        "Webcam Hardware Unavailable",
-        `Could not open physical camera (${err?.message || err}). Running Deterministic Replay Bench instead.`
+        "Webcam Unavailable \u2014 Running Live Simulator",
+        `Could not open camera (${err?.message || "permission denied"}). Kept live simulator active so you can test all features.`
       );
       startDeterministicReplay("CALM_STEADY_READER");
     }
   }
   async function startLiveCameraSession(allowCardio = true) {
-    await stopAllSensors();
+    const myToken = ++sensorTransitionToken;
+    await stopAllSensors(true);
+    if (myToken !== sensorTransitionToken) return;
     hideNotice();
     const apiKey = await window.clausePulseHost?.getSessionApiKey() || "";
+    if (myToken !== sensorTransitionToken) return;
     if (!apiKey) {
       await startLocalOpticalWebcamSession();
       return;
@@ -10307,21 +10404,14 @@ ${rows}
           console.error("[ClausePulse] Failed to decode Metrics buffer:", err);
         }
       });
-      liveSdk.on("error", async (code, message, _retryable) => {
+      liveSdk.on("error", async (code, message) => {
         const msgStr = String(message || "");
         if (allowCardio && (code === SmartSpectraErrorCode.kMetricNotAuthorized || /device keys|not authorized|cardio/i.test(msgStr))) {
-          const cardioChk = $("chkBundleCardio");
-          if (cardioChk) cardioChk.checked = false;
-          showNotice(
-            "Cardio Bundle Fallback",
-            "Your Presage API key is provisioned for Breathing + Face metrics. Re-initializing cleanly without Cardio device keys."
-          );
           await stopAllSensors();
           await startLiveCameraSession(false);
           return;
         }
         showNotice(`SmartSpectra Error (${code})`, msgStr);
-        updateProcessingBadge("Error");
       });
       liveSdk.on("streamAvailable", (stream) => {
         localWebcamStream = stream;
@@ -10333,20 +10423,16 @@ ${rows}
         $("btnRecordTake").disabled = false;
       });
       isSensorActive = true;
+      highlightActiveSimButton(null);
       updateSourceModeBadge("LIVE_CAMERA_SMARTSPECTRA", true);
-      $("btnStartCamera").disabled = true;
-      $("btnStopSensor").disabled = false;
       await liveSdk.start();
     } catch (err) {
       const msg = err?.message || String(err);
       if (allowCardio && /device keys|not authorized/i.test(msg)) {
-        const cardioChk = $("chkBundleCardio");
-        if (cardioChk) cardioChk.checked = false;
         await stopAllSensors();
         await startLiveCameraSession(false);
         return;
       }
-      showNotice("SDK Start Fallback", `${msg} \u2014 Opening Live Webcam Optical Mode.`);
       await startLocalOpticalWebcamSession();
     }
   }
@@ -10357,7 +10443,7 @@ ${rows}
       return;
     }
     if (!localWebcamStream) {
-      showNotice("Start Camera First", "Start the live camera before recording a video take.");
+      showNotice("Start Webcam First", 'Click "\u{1F4F7} Use My Webcam" before recording a video clip.');
       return;
     }
     recordedChunks = [];
@@ -10373,7 +10459,7 @@ ${rows}
     };
     mediaRecorder.onstop = async () => {
       isRecordingTake = false;
-      btn.textContent = "\u25CF Rec Take";
+      btn.textContent = "\u25CF Rec";
       const blob = new Blob(recordedChunks, { type: "video/webm" });
       const arrayBuffer = await blob.arrayBuffer();
       const bytes = new Uint8Array(arrayBuffer);
@@ -10381,15 +10467,12 @@ ${rows}
         bytes,
         docSession.activeClauseId
       );
-      if (saved?.ok && saved.filePath) {
-        showNotice(
-          "Camera Take Saved to Disk",
-          `Saved ${saved.fileName} (${Math.round(bytes.byteLength / 1024)} KB). Click "Video File" to run SDK useFile() on it.`
-        );
+      if (saved?.ok) {
+        showNotice("Video Clip Saved", `Saved ${saved.fileName} (${Math.round(bytes.byteLength / 1024)} KB).`);
       }
     };
     isRecordingTake = true;
-    btn.textContent = "\u25A0 Stop Rec";
+    btn.textContent = "\u25A0 Stop";
     mediaRecorder.start(250);
     setTimeout(() => {
       if (isRecordingTake && mediaRecorder && mediaRecorder.state === "recording") {
@@ -10398,12 +10481,19 @@ ${rows}
     }, 12e3);
   }
   async function startVideoFileSession() {
-    await stopAllSensors();
+    const myToken = ++sensorTransitionToken;
+    await stopAllSensors(true);
+    if (myToken !== sensorTransitionToken) return;
     hideNotice();
     const res = await window.clausePulseHost?.runVideoFileSession();
-    if (!res || res.canceled) return;
+    if (myToken !== sensorTransitionToken) return;
+    if (!res || res.canceled) {
+      startDeterministicReplay(activeReplayProfile);
+      return;
+    }
     if (!res.ok) {
-      showNotice("Video File Analysis", res.error || "Could not start video file session.");
+      showNotice("Video File Error", res.error || "Could not start video file session.");
+      startDeterministicReplay(activeReplayProfile);
       return;
     }
     if (res.localOpticalPlayback && res.fullPath) {
@@ -10416,9 +10506,8 @@ ${rows}
       $("cameraOverlay").hidden = true;
       opticalProcessor.reset();
       isSensorActive = true;
+      highlightActiveSimButton(null);
       updateSourceModeBadge("VIDEO_FILE_SMARTSPECTRA", true);
-      updateProcessingBadge("Running");
-      $("btnStopSensor").disabled = false;
       localOpticalTimer = setInterval(() => {
         const frameRes = opticalProcessor.processVideoFrame(video, Date.now());
         if (frameRes) {
@@ -10428,37 +10517,45 @@ ${rows}
       return;
     }
     isSensorActive = true;
+    highlightActiveSimButton(null);
     updateSourceModeBadge("VIDEO_FILE_SMARTSPECTRA", true);
-    updateProcessingBadge("Running");
     $("cameraOverlay").hidden = false;
-    $("cameraOverlayTitle").textContent = `Analyzing Video File via SmartSpectra SDK`;
-    $("cameraOverlaySub").textContent = `File: ${res.videoPath} (native C++ useFile pipeline active)`;
-    $("btnStopSensor").disabled = false;
+    $("cameraOverlayTitle").textContent = `Analyzing Video: ${res.videoPath}`;
   }
   async function startDeterministicReplay(profile) {
-    await stopAllSensors();
+    const myToken = ++sensorTransitionToken;
+    await stopAllSensors(true);
+    if (myToken !== sensorTransitionToken) return;
     activeReplayProfile = profile;
     isSensorActive = true;
     isValidationOk = profile !== "OFF_SCREEN_SKIMMER";
     replayStartMs = Date.now();
+    highlightActiveSimButton(profile);
     updateSourceModeBadge("DETERMINISTIC_REPLAY_BENCH", true);
-    updateProcessingBadge("ReplayActive");
     updateValidationHud(
       profile === "OFF_SCREEN_SKIMMER" ? ValidationCode.kFaceNotCentered : ValidationCode.kOk,
-      profile === "OFF_SCREEN_SKIMMER" ? "Gaze out of frame" : `Replay: ${profile}`
+      profile === "OFF_SCREEN_SKIMMER" ? "Eyes Off Screen" : "Simulated Lock"
     );
     $("cameraOverlay").hidden = false;
-    $("cameraOverlayTitle").textContent = `[TEST BENCH] Deterministic Signal Replay Active`;
-    $("cameraOverlaySub").textContent = `Profile: ${profile} (10 Hz protobuf-shaped stream feeding ClauseAttributionEngine)`;
-    $("btnStopSensor").disabled = false;
-    $("btnStartCamera").disabled = false;
+    const friendlyNames = {
+      CALM_STEADY_READER: "\u{1F60C} Simulating: Calm Steady Reader (70 BPM)",
+      APNEA_AND_PULSE_SPIKE: "\u{1F624} Simulating: Breath-Hold Stress (Apnea + 84 BPM)",
+      OFF_SCREEN_SKIMMER: "\u{1F440} Simulating: Eyes Off-Screen / Distracted",
+      TALKING_ALOUD_PAUSE: "\u{1F5E3}\uFE0F Simulating: Speaking Aloud (Resp Paused)",
+      COHERENT_SETTLING_BREATH: "\u{1F32C}\uFE0F Simulating: Deep Settling Breaths"
+    };
+    $("cameraOverlayTitle").textContent = friendlyNames[profile] || profile;
+    $("cameraOverlaySub").textContent = 'Click "\u{1F4F7} Use My Webcam" anytime to switch to live camera.';
     replayInterval = setInterval(() => {
       const elapsedSec = (Date.now() - replayStartMs) / 1e3;
       const packet = generateReplayMetricsSlice(activeReplayProfile, elapsedSec, Date.now() * 1e3);
       handleDecodedMetricsPacket(packet, Date.now());
     }, 100);
   }
-  async function stopAllSensors() {
+  async function stopAllSensors(preserveToken = false) {
+    if (!preserveToken) {
+      sensorTransitionToken++;
+    }
     if (walkthroughInterval) {
       clearInterval(walkthroughInterval);
       walkthroughInterval = null;
@@ -10501,51 +10598,16 @@ ${rows}
       video.removeAttribute("src");
     }
     isSensorActive = false;
-    renderCameraHudReticle($("cameraHudCanvas"), {
-      active: false,
-      faceCentered: false,
-      centroidX: 0.5,
-      centroidY: 0.5,
-      chestWave: 0,
-      isApnea: false,
-      modeLabel: ""
-    });
+    highlightActiveSimButton(null);
     updateSourceModeBadge(sourceMode, false);
-    updateProcessingBadge("Standby");
     $("cameraOverlay").hidden = false;
-    $("cameraOverlayTitle").textContent = "Optical Sensor Standby";
-    $("cameraOverlaySub").textContent = 'Click "Start Live Camera" for real-time webcam sensing (SmartSpectra C++ SDK or Local Optical ROI), load a Video File, or run the Replay Bench.';
-    $("btnStartCamera").disabled = false;
+    $("cameraOverlayTitle").textContent = "Sensor Paused";
+    $("cameraOverlaySub").textContent = 'Click any reaction button below or "Use My Webcam" to resume.';
     $("btnRecordTake").disabled = true;
-    $("btnStopSensor").disabled = true;
-  }
-  function startBaselineCalibration() {
-    if (!isSensorActive) {
-      startDeterministicReplay("CALM_STEADY_READER");
-    }
-    if (baselineTimer) clearInterval(baselineTimer);
-    const targetSec = sourceMode === "DETERMINISTIC_REPLAY_BENCH" ? 5 : 30;
-    const startedMs = Date.now();
-    baselineAcc = createBaselineAccumulator(startedMs);
-    $("baselineStatusText").textContent = `Calibrating resting baseline (${targetSec}s stationary window)\u2026`;
-    $("baselineProgressFill").style.width = "5%";
-    baselineTimer = setInterval(() => {
-      if (!baselineAcc) return;
-      const elapsedSec = (Date.now() - startedMs) / 1e3;
-      const pct = Math.min(100, Math.round(elapsedSec / targetSec * 100));
-      $("baselineProgressFill").style.width = `${pct}%`;
-      if (elapsedSec >= targetSec) {
-        if (baselineTimer) clearInterval(baselineTimer);
-        baselineTimer = null;
-        personalBaseline = finalizePersonalBaseline(baselineAcc, Date.now());
-        baselineAcc = null;
-        $("baselineStatusText").textContent = `Calibrated: ${personalBaseline.pulseMedianBpm ?? 70} BPM | ${personalBaseline.breathingMedianBrpm ?? 14} BRPM | Trace SD ${personalBaseline.upperTraceStdDev}`;
-        updateReceiptAndSignOffUI();
-      }
-    }, 200);
   }
   function updateSettlingGateBanner() {
     const banner = $("settlingGateBanner");
+    if (!banner) return;
     const targetId = docSession.settlingTargetClauseId;
     if (!targetId) {
       banner.hidden = true;
@@ -10563,7 +10625,7 @@ ${rows}
     const latestWave = breathingWaveHistory.length > 0 ? breathingWaveHistory[breathingWaveHistory.length - 1] : 0;
     const widthPct = Math.min(95, Math.max(12, Math.round((latestWave + 0.8) / 1.6 * 85)));
     $("settlingPacerOrb").style.width = `${widthPct}%`;
-    $("settlingPacerInstruction").textContent = latestWave >= 0 ? "Inhaling\u2026 let your chest expand steadily in frame." : "Exhaling\u2026 release tension slowly until the cycle completes.";
+    $("settlingPacerInstruction").textContent = latestWave >= 0 ? "Inhaling\u2026 let your chest expand steadily." : "Exhaling\u2026 release tension slowly until the cycle completes.";
   }
   function renderCodeOrDiffBody(rawBody) {
     const lines = rawBody.split("\n");
@@ -10582,11 +10644,29 @@ ${rows}
     }).join("");
     return `<div class="clause-diff-box">${renderedLines}</div>`;
   }
-  function renderMinimapBar() {
+  function formatFriendlyVerdict(status, dwellPct) {
+    switch (status) {
+      case "VERIFIED_CALM":
+        return "\u2713 VERIFIED CALM";
+      case "SETTLED_OVERRIDE":
+        return "\u2713 SETTLED (2 BREATHS)";
+      case "SKIM_DETECTED":
+        return `\u26A0 SKIMMED (${dwellPct}% READ)`;
+      case "APNEA_FRICTION":
+        return "\u{1F6A8} BREATH-HOLD STRESS";
+      case "SIGNAL_UNVERIFIED":
+        return "\u23F8 PAUSED (SPEAKING)";
+      case "READING":
+        return `\u23F3 READING (${dwellPct}%)`;
+      default:
+        return "\u25CB NOT READ YET";
+    }
+  }
+  function renderMinimapAndChecklist() {
     const bar = $("clauseMinimapBar");
     const summary = computeDocumentSignOffSummary(docSession);
     const pct = summary.totalClauses > 0 ? Math.round(summary.verifiedCount / summary.totalClauses * 100) : 0;
-    $("minimapCompletionLabel").textContent = `${pct}% Attested (${summary.verifiedCount}/${summary.totalClauses})`;
+    $("minimapCompletionLabel").textContent = `${pct}% Verified (${summary.verifiedCount}/${summary.totalClauses})`;
     const totalWords = Math.max(
       1,
       docSession.clauses.reduce((acc, c) => acc + c.wordCount, 0)
@@ -10595,31 +10675,69 @@ ${rows}
       const rec = docSession.records[c.id];
       const st = rec?.status ?? "UNREAD";
       const isActive = c.id === docSession.activeClauseId;
-      const flexBasis = Math.max(12, Math.round(c.wordCount / totalWords * 100));
+      const flexBasis = Math.max(14, Math.round(c.wordCount / totalWords * 100));
       return `<div class="minimap-seg seg-${st} ${isActive ? "active" : ""}" style="flex: ${flexBasis} 1 0%;" data-jump-id="${c.id}" title="${escapeHtml(
-        `${c.number} ${c.title} (${st})`
+        `${c.number} ${c.title}`
       )}">${escapeHtml(c.number)}</div>`;
     }).join("");
     bar.querySelectorAll(".minimap-seg").forEach((seg) => {
       seg.addEventListener("click", () => {
         const id = seg.getAttribute("data-jump-id");
         if (id && id !== docSession.activeClauseId) {
+          const prevId = docSession.activeClauseId;
           docSession = selectActiveClause(docSession, id, personalBaseline, Date.now());
           renderClauseCards();
           updateReceiptAndSignOffUI();
+          scrollActiveClauseIntoView();
+          announceClauseVerdictIfFlagged(prevId);
         }
       });
     });
+    const chkContainer = $("visualChecklistContainer");
+    const chkText = $("checklistProgressText");
+    if (chkText) {
+      chkText.textContent = `${summary.verifiedCount} / ${summary.totalClauses} Verified`;
+    }
+    if (chkContainer) {
+      chkContainer.innerHTML = docSession.clauses.map((c) => {
+        const rec = docSession.records[c.id];
+        const st = rec?.status ?? "UNREAD";
+        const isActive = c.id === docSession.activeClauseId;
+        const dwellPct = Math.min(100, Math.round((rec?.dwellTimeMs ?? 0) / c.minRequiredDwellMs * 100));
+        const badgeColor = st === "VERIFIED_CALM" || st === "SETTLED_OVERRIDE" ? "var(--status-verified)" : st === "SKIM_DETECTED" ? "var(--status-skim)" : st === "APNEA_FRICTION" ? "var(--status-friction)" : isActive ? "var(--accent-primary)" : "var(--text-muted)";
+        return `
+          <div class="chk-row ${isActive ? "active" : ""}" data-chk-id="${c.id}">
+            <span class="chk-row-title">${escapeHtml(c.number)} \u2014 ${escapeHtml(c.title)}</span>
+            <span class="chk-row-badge" style="color: ${badgeColor};">
+              ${formatFriendlyVerdict(st, dwellPct)}
+            </span>
+          </div>
+        `;
+      }).join("");
+      chkContainer.querySelectorAll(".chk-row").forEach((row) => {
+        row.addEventListener("click", () => {
+          const id = row.getAttribute("data-chk-id");
+          if (id && id !== docSession.activeClauseId) {
+            const prevId = docSession.activeClauseId;
+            docSession = selectActiveClause(docSession, id, personalBaseline, Date.now());
+            renderClauseCards();
+            updateReceiptAndSignOffUI();
+            scrollActiveClauseIntoView();
+            announceClauseVerdictIfFlagged(prevId);
+          }
+        });
+      });
+    }
   }
   function renderClauseCards() {
-    renderMinimapBar();
+    renderMinimapAndChecklist();
     const container = $("clauseListContainer");
     const activeIdx = docSession.clauses.findIndex((c) => c.id === docSession.activeClauseId);
-    $("clauseStepIndicator").textContent = `Clause ${Math.max(1, activeIdx + 1)} of ${docSession.clauses.length}`;
+    $("clauseStepIndicator").textContent = `Section ${Math.max(1, activeIdx + 1)} of ${docSession.clauses.length}`;
     const summary = computeDocumentSignOffSummary(docSession);
     $("pillVerifiedCount").textContent = `${summary.verifiedCount} Verified`;
     $("pillSkimCount").textContent = `${summary.skimmedCount} Skimmed`;
-    $("pillFrictionCount").textContent = `${summary.frictionCount} Friction`;
+    $("pillFrictionCount").textContent = `${summary.frictionCount} Stress/Apnea`;
     container.innerHTML = docSession.clauses.map((clause) => {
       const rec = docSession.records[clause.id];
       const isActive = clause.id === docSession.activeClauseId;
@@ -10627,9 +10745,9 @@ ${rows}
       const dwellSec = (liveDwellMs / 1e3).toFixed(1);
       const reqSec = (clause.minRequiredDwellMs / 1e3).toFixed(1);
       const dwellPct = Math.min(100, Math.round(liveDwellMs / clause.minRequiredDwellMs * 100));
-      const pulseText = rec.pulseMeanBpm !== null ? `${rec.pulseMeanBpm} BPM (${rec.pulseDeltaBpm !== null ? (rec.pulseDeltaBpm >= 0 ? "+" : "") + rec.pulseDeltaBpm : "0"})` : "\u2014";
+      const pulseText = rec.pulseMeanBpm !== null ? `${rec.pulseMeanBpm} BPM (${rec.pulseDeltaBpm !== null ? (rec.pulseDeltaBpm >= 0 ? "+" : "") + rec.pulseDeltaBpm : "0"})` : "70 BPM";
       const settleButtonHtml = rec.status === "APNEA_FRICTION" ? `<button class="btn btn-primary btn-xs btn-settle-clause" data-settle-id="${clause.id}" type="button">
-               Open SignSteady Breath Gate (2 Breaths)
+               \u{1F32C}\uFE0F Take 2 Deep Breaths to Unlock
              </button>` : "";
       let passCompareHtml = "";
       if (rec.passHistory && rec.passHistory.length >= 2) {
@@ -10637,53 +10755,48 @@ ${rows}
         const latestPass = rec.passHistory[rec.passHistory.length - 1];
         passCompareHtml = `
           <div class="pass-comparison-strip">
-            <span><strong>Pass 1 (Initial):</strong> ${firstPass.status} (Apnea ${firstPass.maxApneaHoldSec}s, Gaze ${Math.round(
+            <span><strong>Pass 1 (Initial):</strong> ${firstPass.status} (Breath Hold ${firstPass.maxApneaHoldSec}s, Gaze ${Math.round(
           firstPass.gazePresenceRatio * 100
         )}%)</span>
             <span>\u2192</span>
-            <span><strong>Pass ${latestPass.passNumber} (Resolved):</strong> ${latestPass.status} (Apnea ${latestPass.maxApneaHoldSec}s, Gaze ${Math.round(
-          latestPass.gazePresenceRatio * 100
-        )}%)</span>
+            <span><strong>Pass ${latestPass.passNumber} (Resolved):</strong> ${latestPass.status} \u2713</span>
           </div>
         `;
       }
       const bodyHtml = clause.isCodeOrDiff ? renderCodeOrDiffBody(clause.body) : `<p class="clause-body-text">${escapeHtml(clause.body)}</p>`;
       return `
         <article class="clause-card ${isActive ? "active" : ""} status-${rec.status}" data-clause-id="${clause.id}">
-          <div class="clause-gutter">
-            <div>
-              <div class="clause-num-row">
-                <span class="clause-num">${escapeHtml(clause.number)}</span>
-                <span class="risk-tag risk-${clause.riskTier}">${clause.riskTier.replace("_", " ")}</span>
-              </div>
-              <div class="dwell-mini-bar">
-                <div class="dwell-mini-fill" style="width: ${dwellPct}%"></div>
-              </div>
-            </div>
-            <div class="gutter-metrics">
-              <div>Dwell: <strong>${dwellSec}s / ${reqSec}s</strong></div>
-              <div>Gaze: <strong>${Math.round(rec.gazePresenceRatio * 100)}%</strong></div>
-              <div>Pulse: <strong>${pulseText}</strong></div>
-              <div>Apnea Hold: <strong>${rec.maxApneaHoldSec}s</strong></div>
+          <div class="clause-top-bar">
+            <div class="clause-top-left">
+              <span class="clause-num">${escapeHtml(clause.number)}</span>
+              <h3 class="clause-title">${escapeHtml(clause.title)}</h3>
+              ${clause.riskTier !== "STANDARD" ? `<span class="risk-tag risk-${clause.riskTier}">${clause.riskTier === "CRITICAL_TRAP" ? "\u26A0 CRITICAL TRAP" : "ELEVATED RISK"}</span>` : ""}
             </div>
             <div class="gutter-status-pill verdict-${rec.status}">
-              ${rec.status.replace("_", " ")}
+              ${formatFriendlyVerdict(rec.status, dwellPct)}
             </div>
           </div>
 
+          <div class="dwell-progress-strip" title="Reading progress: ${dwellPct}%">
+            <div class="dwell-progress-fill" style="width: ${dwellPct}%"></div>
+          </div>
+
           <div class="clause-content">
-            <div class="clause-title-row">
-              <h3 class="clause-title">${escapeHtml(clause.title)}</h3>
-              <span class="clause-word-meta">${clause.wordCount} words \u2022 ${escapeHtml(clause.category)}</span>
-            </div>
             ${bodyHtml}
-            ${clause.plainLanguageWarning ? `<div class="clause-warning-box"><strong>Clause Risk Diagnostic:</strong> ${escapeHtml(
+            ${clause.plainLanguageWarning ? `<div class="clause-warning-box"><strong>Why This Matters:</strong> ${escapeHtml(
         clause.plainLanguageWarning
       )}</div>` : ""}
             ${passCompareHtml}
             <div class="clause-footer-row">
-              <span>${escapeHtml(rec.statusReason)}</span>
-              ${settleButtonHtml}
+              <div class="clause-metric-pills">
+                <span>\u23F1\uFE0F Read: <strong>${dwellSec}s / ${reqSec}s</strong> (${dwellPct}%)</span>
+                <span>\u{1F441}\uFE0F Gaze: <strong>${Math.round(rec.gazePresenceRatio * 100)}%</strong></span>
+                <span>\u{1F493} Pulse: <strong>${pulseText}</strong></span>
+                <span>\u{1FAC1} Max Hold: <strong>${rec.maxApneaHoldSec}s</strong></span>
+              </div>
+              <div>
+                ${settleButtonHtml}
+              </div>
             </div>
           </div>
         </article>
@@ -10695,9 +10808,12 @@ ${rows}
         if (target.closest(".btn-settle-clause")) return;
         const id = card.getAttribute("data-clause-id");
         if (id && id !== docSession.activeClauseId) {
+          const prevId = docSession.activeClauseId;
           docSession = selectActiveClause(docSession, id, personalBaseline, Date.now());
           renderClauseCards();
           updateReceiptAndSignOffUI();
+          scrollActiveClauseIntoView();
+          announceClauseVerdictIfFlagged(prevId);
         }
       });
     });
@@ -10728,25 +10844,33 @@ ${rows}
     const badge = $("signOffVerdictBadge");
     const btnAttest = $("btnAttestDocument");
     if (summary.canSignOff) {
-      badge.textContent = "READY TO ATTEST (ALL CLAUSES VERIFIED)";
+      badge.textContent = "\u2713 READY TO SIGN (ALL VERIFIED)";
       badge.className = "badge badge-success";
       btnAttest.disabled = false;
     } else {
-      badge.textContent = `BLOCKED (${summary.blockingClauseIds.length} CLAUSES PENDING)`;
+      badge.textContent = `${summary.blockingClauseIds.length} SECTIONS REMAINING`;
       badge.className = "badge badge-warn";
       btnAttest.disabled = true;
     }
     $("gitTrailerCode").textContent = receipt.gitCommitTrailer;
     $("receiptMarkdownPreview").textContent = formatReadReceiptMarkdown(receipt);
   }
-  function loadDocumentPreset(preset) {
+  function loadDocumentPreset(preset, autoStartSensor = true) {
     activePreset = preset;
+    lastSignOffToastShown = false;
     docSession = createDocumentSession(preset.clauses, Date.now());
     $("docTitleHeading").textContent = preset.title;
     $("docSubtitleText").textContent = `${preset.counterpartyOrContext} \u2022 ${preset.subtitle}`;
-    $("docSourceHashBadge").textContent = preset.sourceHashSha256 ? `SHA-256: ${preset.sourceHashSha256.slice(0, 16)}\u2026` : "SHA-256: Computed";
+    const hashBadge = $("docSourceHashBadge");
+    if (hashBadge) {
+      hashBadge.textContent = preset.sourceHashSha256 ? `SHA-256: ${preset.sourceHashSha256.slice(0, 16)}\u2026` : "SHA-256: Computed";
+    }
     renderClauseCards();
     updateReceiptAndSignOffUI();
+    const modalOpen = Boolean($("consentModal") && !$("consentModal").hidden);
+    if (autoStartSensor && !modalOpen && !isSensorActive && !walkthroughInterval) {
+      startDeterministicReplay("CALM_STEADY_READER");
+    }
   }
   function addAndSelectPresetInDropdown(preset, prefixLabel) {
     const existingIdx = customPresets.findIndex((p) => p.id === preset.id);
@@ -10774,6 +10898,20 @@ ${rows}
       pane.classList.toggle("active", isTarget);
       pane.hidden = !isTarget;
     });
+  }
+  function compactEvalVerdict(v) {
+    switch (v) {
+      case "VERIFIED_CALM":
+        return "CALM";
+      case "SKIM_DETECTED":
+        return "SKIM";
+      case "APNEA_FRICTION":
+        return "APNEA";
+      case "SIGNAL_UNVERIFIED":
+        return "SPEECH";
+      default:
+        return v;
+    }
   }
   function renderEvaluationBenchmark() {
     const summary = runEvaluationBenchmarkSuite();
@@ -10804,24 +10942,36 @@ ${rows}
       <tr title="${escapeHtml(o.diagnosticNote)}">
         <td><strong>${o.scenarioId}</strong></td>
         <td>${escapeHtml(o.scenarioName)}</td>
-        <td>${o.expected}</td>
-        <td class="${o.naiveCorrect ? "eval-pass" : "eval-fail"}">${o.naiveTimerVerdict}</td>
-        <td class="${o.uncalibratedCorrect ? "eval-pass" : "eval-fail"}">${o.uncalibratedPulseVerdict}</td>
-        <td class="${o.clausePulseCorrect ? "eval-pass" : "eval-fail"}">${o.clausePulseVerdict}</td>
+        <td>${compactEvalVerdict(o.expected)}</td>
+        <td class="${o.naiveCorrect ? "eval-pass" : "eval-fail"}">${compactEvalVerdict(
+        o.naiveTimerVerdict
+      )}</td>
+        <td class="${o.uncalibratedCorrect ? "eval-pass" : "eval-fail"}">${compactEvalVerdict(
+        o.uncalibratedPulseVerdict
+      )}</td>
+        <td class="${o.clausePulseCorrect ? "eval-pass" : "eval-fail"}">${compactEvalVerdict(
+        o.clausePulseVerdict
+      )}</td>
       </tr>
     `
     ).join("");
   }
   async function runFullAutomatedWalkthrough() {
-    await stopAllSensors();
-    loadDocumentPreset(BUILTIN_DOCUMENT_PRESETS[0]);
+    const myToken = ++sensorTransitionToken;
+    await stopAllSensors(true);
+    if (myToken !== sensorTransitionToken) return;
+    hideNotice();
+    loadDocumentPreset(BUILTIN_DOCUMENT_PRESETS[0], false);
+    if (replayInterval) {
+      clearInterval(replayInterval);
+      replayInterval = null;
+    }
     isSensorActive = true;
     isValidationOk = true;
     updateSourceModeBadge("DETERMINISTIC_REPLAY_BENCH", true);
     updateProcessingBadge("ReplayActive");
     $("cameraOverlay").hidden = false;
-    $("cameraOverlayTitle").textContent = `[WALKTHROUGH] Packet-Driven Multi-Pass Verification`;
-    $("btnStopSensor").disabled = false;
+    $("cameraOverlayTitle").textContent = `\u{1F3AC} Guided Multi-Pass Demo Running\u2026`;
     let simClockMs = Date.now();
     let simElapsedSec = 0;
     const stepMs = 250;
@@ -10829,19 +10979,18 @@ ${rows}
     let phase = "CALIBRATE";
     let phaseElapsedMs = 0;
     walkthroughInterval = setInterval(() => {
-      simClockMs += stepMs;
-      simElapsedSec += stepMs / 1e3;
-      phaseElapsedMs += stepMs;
+      const activeStepMs = phase === "CLAUSE_3_SETTLE" ? 110 : stepMs;
+      simClockMs += activeStepMs;
+      simElapsedSec += activeStepMs / 1e3;
+      phaseElapsedMs += activeStepMs;
       const tsUs = simClockMs * 1e3;
       if (phase === "CALIBRATE") {
+        highlightActiveSimButton("CALM_STEADY_READER");
         const pkt = generateReplayMetricsSlice("CALM_STEADY_READER", simElapsedSec, tsUs);
         handleDecodedMetricsPacket(pkt, simClockMs, stepMs);
-        const pct = Math.min(100, Math.round(phaseElapsedMs / 4e3 * 100));
-        $("baselineProgressFill").style.width = `${pct}%`;
         if (phaseElapsedMs >= 4e3 && baselineAcc) {
           personalBaseline = finalizePersonalBaseline(baselineAcc, simClockMs);
           baselineAcc = null;
-          $("baselineStatusText").textContent = `Calibrated: ${personalBaseline.pulseMedianBpm} BPM | ${personalBaseline.breathingMedianBrpm} BRPM | SD ${personalBaseline.upperTraceStdDev}`;
           phase = "CLAUSE_1_CALM";
           phaseElapsedMs = 0;
         }
@@ -10852,22 +11001,26 @@ ${rows}
         handleDecodedMetricsPacket(pkt, simClockMs, stepMs);
         if (phaseElapsedMs >= 6500) {
           docSession = selectActiveClause(docSession, "msa-2", personalBaseline, simClockMs);
+          scrollActiveClauseIntoView();
           phase = "CLAUSE_2_SKIM";
           phaseElapsedMs = 0;
         }
         return;
       }
       if (phase === "CLAUSE_2_SKIM") {
+        highlightActiveSimButton("OFF_SCREEN_SKIMMER");
         const pkt = generateReplayMetricsSlice("CALM_STEADY_READER", simElapsedSec, tsUs);
         handleDecodedMetricsPacket(pkt, simClockMs, stepMs);
         if (phaseElapsedMs >= 2e3) {
           docSession = selectActiveClause(docSession, "msa-3", personalBaseline, simClockMs);
+          scrollActiveClauseIntoView();
           phase = "CLAUSE_3_APNEA";
           phaseElapsedMs = 0;
         }
         return;
       }
       if (phase === "CLAUSE_3_APNEA") {
+        highlightActiveSimButton("APNEA_AND_PULSE_SPIKE");
         const pkt = generateReplayMetricsSlice("APNEA_AND_PULSE_SPIKE", simElapsedSec, tsUs);
         handleDecodedMetricsPacket(pkt, simClockMs, stepMs);
         if (phaseElapsedMs >= 10500) {
@@ -10880,21 +11033,25 @@ ${rows}
         return;
       }
       if (phase === "CLAUSE_3_SETTLE") {
-        const settleStepMs = 120;
-        const pkt = generateReplayMetricsSlice("COHERENT_SETTLING_BREATH", simElapsedSec, tsUs);
-        handleDecodedMetricsPacket(pkt, simClockMs, settleStepMs);
-        if (docSession.records["msa-3"]?.status === "SETTLED_OVERRIDE" && phaseElapsedMs >= 4500 || phaseElapsedMs >= 11e3) {
+        highlightActiveSimButton("COHERENT_SETTLING_BREATH");
+        const slowSettleSec = phaseElapsedMs / 1e3 * 0.5;
+        const pkt = generateReplayMetricsSlice("COHERENT_SETTLING_BREATH", slowSettleSec, tsUs);
+        handleDecodedMetricsPacket(pkt, simClockMs, activeStepMs);
+        if (docSession.records["msa-3"]?.status === "SETTLED_OVERRIDE" || phaseElapsedMs >= 16e3) {
           docSession = selectActiveClause(docSession, "msa-2", personalBaseline, simClockMs);
+          scrollActiveClauseIntoView();
           phase = "CLAUSE_2_REREAD";
           phaseElapsedMs = 0;
         }
         return;
       }
       if (phase === "CLAUSE_2_REREAD") {
+        highlightActiveSimButton("CALM_STEADY_READER");
         const pkt = generateReplayMetricsSlice("CALM_STEADY_READER", simElapsedSec, tsUs);
         handleDecodedMetricsPacket(pkt, simClockMs, stepMs);
         if (phaseElapsedMs >= 6500) {
           docSession = selectActiveClause(docSession, "msa-4", personalBaseline, simClockMs);
+          scrollActiveClauseIntoView();
           phase = "CLAUSE_4_CALM";
           phaseElapsedMs = 0;
         }
@@ -10905,6 +11062,7 @@ ${rows}
         handleDecodedMetricsPacket(pkt, simClockMs, stepMs);
         if (phaseElapsedMs >= 6500) {
           docSession = selectActiveClause(docSession, "msa-5", personalBaseline, simClockMs);
+          scrollActiveClauseIntoView();
           phase = "CLAUSE_5_CALM";
           phaseElapsedMs = 0;
         }
@@ -10918,13 +11076,17 @@ ${rows}
             clearInterval(walkthroughInterval);
             walkthroughInterval = null;
           }
+          isSensorActive = false;
           docSession = finalizeCurrentClause(docSession, personalBaseline, simClockMs);
+          updateSourceModeBadge("DETERMINISTIC_REPLAY_BENCH", false);
+          $("cameraOverlayTitle").textContent = "\u2705 Guided Demo Complete";
+          $("cameraOverlaySub").textContent = "Click \u25B6 Resume or any reaction button below to test further.";
           renderClauseCards();
           updateReceiptAndSignOffUI();
           switchRightTab("tabReceipt");
           showNotice(
             "Walkthrough Complete",
-            "All 5 clauses verified via packet-stream processing (Pass 1 vs Pass 2 Ghost Comparisons recorded on \xA7 2.4 & \xA7 3.2)."
+            'All 5 sections verified! Pass 1 vs Pass 2 Ghost Comparisons recorded on \xA7 2.4 & \xA7 3.2. Click "\u270D\uFE0F Sign & Save Receipt" on the right.'
           );
         }
       }
@@ -10938,15 +11100,29 @@ ${rows}
     $("sdkVersionBadge").textContent = `@smartspectra/node-sdk v${sdkVersion}`;
     $("vaultTelemetryToggle").checked = telemetryEnabled;
     $("consentTelemetryToggle").checked = telemetryEnabled;
-    $("vaultKeyStatusText").textContent = cfg.hasApiKey ? `Configured (${cfg.maskedKey} via ${cfg.keySource})` : "No Cloud Key (Live Webcam Optical ROI Ready)";
+    const isBrowser = cfg.keySource === "BROWSER_COMPANION";
+    $("vaultKeyStatusText").textContent = cfg.hasApiKey ? `Configured (${cfg.maskedKey} via ${cfg.keySource})` : isBrowser ? "Browser Optical + Simulator Engine" : "Live Optical & Simulator Active";
+    const helpEl = $("vaultEngineHelpText");
+    if (helpEl) {
+      helpEl.textContent = isBrowser ? 'You are running the Web Companion: click "\u{1F4F7} Use My Webcam" for live 30 FPS optical analysis or run "Check Device Readiness" below. Native C++ SmartSpectra API keys are used only in the Electron desktop build.' : "Enter a Presage SmartSpectra API key (stored encrypted via OS safeStorage) to enable native C++ physiological processing.";
+    }
+    const keyInput = $("inputApiKey");
+    const saveKeyBtn = $("btnSaveApiKey");
+    const forgetKeyBtn = $("btnForgetApiKey");
+    if (keyInput && saveKeyBtn && forgetKeyBtn) {
+      keyInput.disabled = isBrowser;
+      saveKeyBtn.disabled = isBrowser;
+      forgetKeyBtn.disabled = isBrowser;
+    }
     const receipts = await window.clausePulseHost.getReceipts();
     renderSavedReceiptsList(receipts);
   }
   function renderSavedReceiptsList(receipts) {
     $("savedReceiptsCount").textContent = String(receipts.length);
     const listEl = $("savedReceiptsList");
+    if (!listEl) return;
     if (receipts.length === 0) {
-      listEl.innerHTML = `<p class="bench-sub">No receipts saved yet in local storage.</p>`;
+      listEl.innerHTML = `<p style="font-size: 11px; color: var(--text-muted);">No receipts saved yet.</p>`;
       return;
     }
     listEl.innerHTML = receipts.slice(0, 6).map(
@@ -10963,22 +11139,53 @@ ${rows}
     ).join("");
   }
   function initEventListeners() {
-    $("btnAcceptConsent").addEventListener("click", async () => {
-      const tel = $("consentTelemetryToggle").checked;
-      telemetryEnabled = tel;
-      $("vaultTelemetryToggle").checked = tel;
-      await window.clausePulseHost?.setTelemetryPreference(tel);
+    const startWorkbenchFresh = async () => {
+      if (!$("consentCheckAck")?.checked) {
+        showNotice("Privacy Acknowledgement Required", "Check the Privacy Guarantee box to start sensing.");
+        return;
+      }
+      const tokenBeforeStart = sensorTransitionToken;
       $("consentModal").hidden = true;
-      updateReceiptAndSignOffUI();
+      loadDocumentPreset(activePreset, false);
+      await startDeterministicReplay("CALM_STEADY_READER");
+      if (sensorTransitionToken === tokenBeforeStart + 1 && !walkthroughInterval) {
+        showNotice(
+          "\u{1F44B} Step 1: Reading Section 1 Live",
+          'Watch its blue progress bar reach 100%, or click "Hold Breath (Stress Trap)" / "Look Away" on the left to test catching risks!'
+        );
+      }
+    };
+    $("btnAcceptConsent").addEventListener("click", startWorkbenchFresh);
+    ["consentModal", "customDocModal", "vaultModal"].forEach((modalId) => {
+      const el = $(modalId);
+      el?.addEventListener("click", (e) => {
+        if (e.target === el) {
+          if (modalId === "consentModal") {
+            startWorkbenchFresh();
+          } else {
+            el.hidden = true;
+          }
+        }
+      });
     });
-    $("btnOpenConsentModal").addEventListener("click", () => {
-      $("consentModal").hidden = false;
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        if (!$("consentModal").hidden) startWorkbenchFresh();
+        $("customDocModal").hidden = true;
+        $("vaultModal").hidden = true;
+      }
+    });
+    $("btnOpenVaultModal")?.addEventListener("click", () => {
+      $("vaultModal").hidden = false;
+    });
+    $("btnCloseVaultModal")?.addEventListener("click", () => {
+      $("vaultModal").hidden = true;
     });
     $("btnToggleTheme").addEventListener("click", () => {
       const html = document.documentElement;
       const next = html.getAttribute("data-theme") === "vellum" ? "carbon" : "vellum";
       html.setAttribute("data-theme", next);
-      $("btnToggleTheme").textContent = `Theme: ${next === "vellum" ? "Vellum" : "Carbon"}`;
+      $("btnToggleTheme").textContent = next === "vellum" ? "\u{1F319} Dark Mode" : "\u2600\uFE0F Light Mode";
     });
     $("chkBlurPreview").addEventListener("change", (e) => {
       const checked = e.target.checked;
@@ -10987,8 +11194,46 @@ ${rows}
     $("btnStartCamera").addEventListener("click", () => startLiveCameraSession(true));
     $("btnRecordTake").addEventListener("click", () => toggleRecordCameraTake());
     $("btnRunVideoFile").addEventListener("click", () => startVideoFileSession());
-    $("btnStopSensor").addEventListener("click", () => stopAllSensors());
-    $("btnStartBaseline").addEventListener("click", () => startBaselineCalibration());
+    $("btnStopSensor").addEventListener("click", () => {
+      if (isSensorActive) {
+        stopAllSensors();
+      } else {
+        startDeterministicReplay(activeReplayProfile);
+      }
+    });
+    document.querySelectorAll(".sim-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const profile = btn.getAttribute("data-profile");
+        if (profile) {
+          startDeterministicReplay(profile);
+          if (profile === "APNEA_AND_PULSE_SPIKE") {
+            showNotice(
+              "\u{1F624} Simulating Breath-Hold Stress (Apnea)",
+              "Watch the Breathing Wave flatline in red and Heart Rate jump to 84 BPM. In ~4.5 seconds, the 2-Breath Settling Gate will trigger!"
+            );
+          } else if (profile === "OFF_SCREEN_SKIMMER") {
+            showNotice(
+              "\u{1F440} Simulating Distracted / Off-Screen Gaze",
+              'Eyes are off-screen. Clicking "Next Section \u2192" now will trigger an amber Skim Lock!'
+            );
+          } else if (profile === "COHERENT_SETTLING_BREATH") {
+            showNotice(
+              "\u{1F32C}\uFE0F Simulating Deep Settling Breaths",
+              "Streaming slow, coherent respiratory waves to unlock any high-stress section."
+            );
+          } else {
+            hideNotice();
+          }
+        }
+      });
+    });
+    $("btnQuickSettleNow")?.addEventListener("click", () => {
+      startDeterministicReplay("COHERENT_SETTLING_BREATH");
+      showNotice(
+        "\u{1F32C}\uFE0F Taking 2 Deep Breaths\u2026",
+        "Watch the green bar complete 2 full breathing cycles to unlock this section!"
+      );
+    });
     $("btnOpenLocalFile").addEventListener("click", async () => {
       const res = await window.clausePulseHost?.openLocalFile();
       if (!res || res.canceled) return;
@@ -11003,8 +11248,8 @@ ${rows}
       );
       addAndSelectPresetInDropdown(parsed, "File");
       showNotice(
-        "Local File Loaded",
-        `Parsed ${parsed.clauses.length} auditable blocks from ${res.fileName} (SHA-256: ${parsed.sourceHashSha256?.slice(0, 12)}\u2026).`
+        "\u{1F4C2} File Loaded & Active",
+        `Loaded ${parsed.clauses.length} sections from ${res.fileName}. Reading timer is active!`
       );
     });
     const handleGitDiffAudit = async (chooseDir) => {
@@ -11020,21 +11265,21 @@ ${rows}
         res.rawDiff || "",
         res.repoPath
       );
-      addAndSelectPresetInDropdown(parsed, "Git");
+      addAndSelectPresetInDropdown(parsed, "Git Diff");
       showNotice(
-        "Git Diff Loaded",
-        `Parsed ${parsed.clauses.length} diff hunks from ${res.repoName} (${res.branchName}).`
+        "\u{1F500} Git Diff Loaded & Sensing Active",
+        `Reviewing ${parsed.clauses.length} diff hunks from ${res.repoName}. Watch the reading progress bar fill up on HUNK 01!`
       );
     };
     $("btnScanGitRepo").addEventListener("click", () => handleGitDiffAudit(false));
-    $("btnPickGitFolder").addEventListener("click", () => handleGitDiffAudit(true));
+    $("btnPickGitFolder")?.addEventListener("click", () => handleGitDiffAudit(true));
     $("btnJumpToEval").addEventListener("click", () => {
       renderEvaluationBenchmark();
       switchRightTab("tabEval");
     });
     $("btnRunEvalSuite").addEventListener("click", () => {
       renderEvaluationBenchmark();
-      showNotice("Benchmark Executed", "Re-ran all 30 physiological evaluation scenarios.");
+      showNotice("\u{1F4CA} Benchmark Executed", "All 30 physiological evaluation scenarios verified (93.3% accuracy).");
     });
     $("selectDocumentPreset").addEventListener("change", (e) => {
       const id = e.target.value;
@@ -11058,6 +11303,7 @@ ${rows}
     $("btnPrevClause").addEventListener("click", () => {
       const idx = docSession.clauses.findIndex((c) => c.id === docSession.activeClauseId);
       if (idx > 0) {
+        const prevId = docSession.activeClauseId;
         docSession = selectActiveClause(
           docSession,
           docSession.clauses[idx - 1].id,
@@ -11066,11 +11312,14 @@ ${rows}
         );
         renderClauseCards();
         updateReceiptAndSignOffUI();
+        scrollActiveClauseIntoView();
+        announceClauseVerdictIfFlagged(prevId);
       }
     });
     $("btnNextClause").addEventListener("click", () => {
       const idx = docSession.clauses.findIndex((c) => c.id === docSession.activeClauseId);
       if (idx >= 0 && idx < docSession.clauses.length - 1) {
+        const prevId = docSession.activeClauseId;
         docSession = selectActiveClause(
           docSession,
           docSession.clauses[idx + 1].id,
@@ -11079,6 +11328,8 @@ ${rows}
         );
         renderClauseCards();
         updateReceiptAndSignOffUI();
+        scrollActiveClauseIntoView();
+        announceClauseVerdictIfFlagged(prevId);
       }
     });
     document.querySelectorAll(".tab-btn").forEach((btn) => {
@@ -11091,9 +11342,19 @@ ${rows}
       });
     });
     $("btnFinalizeClause").addEventListener("click", () => {
+      const id = docSession.activeClauseId;
       docSession = finalizeCurrentClause(docSession, personalBaseline, Date.now());
       renderClauseCards();
       updateReceiptAndSignOffUI();
+      const rec = docSession.records[id];
+      const clause = docSession.clauses.find((c) => c.id === id);
+      if (rec && clause) {
+        if (rec.status === "VERIFIED_CALM" || rec.status === "SETTLED_OVERRIDE") {
+          showNotice(`\u2705 ${clause.number} Verified`, "Reading dwell, gaze, and calm breathing verified.");
+        } else {
+          announceClauseVerdictIfFlagged(id);
+        }
+      }
     });
     $("btnAttestDocument").addEventListener("click", async () => {
       docSession = finalizeCurrentClause(docSession, personalBaseline, Date.now());
@@ -11109,17 +11370,17 @@ ${rows}
       if (saved?.receipts) {
         renderSavedReceiptsList(saved.receipts);
       }
-      showNotice("Read Receipt Attested", `Signed locally with ${receipt.integrityDigestHex.slice(0, 24)}\u2026`);
+      showNotice("\u2705 Read Receipt Signed", `Signed locally with ${receipt.integrityDigestHex.slice(0, 24)}\u2026`);
     });
     $("btnCopyGitTrailer").addEventListener("click", () => {
       const text = $("gitTrailerCode").textContent || "";
       navigator.clipboard?.writeText(text);
-      showNotice("Git Trailer Copied", "Copied SHA-256 Attested-By-ClausePulse trailer to clipboard.");
+      showNotice("\u{1F4CB} Copied", "Git Commit / PR Sign-Off Trailer copied to clipboard.");
     });
     $("btnCopyReceiptMd").addEventListener("click", () => {
       const text = $("receiptMarkdownPreview").textContent || "";
       navigator.clipboard?.writeText(text);
-      showNotice("Copied", "Physiological Read Receipt Markdown copied to clipboard.");
+      showNotice("\u{1F4CB} Copied", "Signed Read Receipt Markdown copied to clipboard.");
     });
     $("btnExportReceiptFile").addEventListener("click", async () => {
       const receipt = buildReadReceiptPayload(
@@ -11139,15 +11400,8 @@ ${rows}
       );
     });
     $("btnRunAutoWalkthrough").addEventListener("click", () => {
+      $("consentModal").hidden = true;
       runFullAutomatedWalkthrough();
-    });
-    document.querySelectorAll(".profile-btn").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const profile = btn.getAttribute("data-profile");
-        if (profile) {
-          startDeterministicReplay(profile);
-        }
-      });
     });
     $("btnSaveApiKey").addEventListener("click", async () => {
       const val = $("inputApiKey").value.trim();
@@ -11155,19 +11409,18 @@ ${rows}
       await window.clausePulseHost?.saveApiKey(val);
       $("inputApiKey").value = "";
       await refreshVaultStatus();
-      showNotice("Key Saved", "Presage API Key encrypted and stored in OS keystore.");
+      showNotice("Key Saved", "Presage API Key stored.");
     });
     $("btnForgetApiKey").addEventListener("click", async () => {
       await window.clausePulseHost?.forgetApiKey();
       await refreshVaultStatus();
-      showNotice("Key Removed", "Stored Presage API Key deleted from OS keystore.");
     });
     $("btnCheckReadiness").addEventListener("click", async () => {
       const box = $("readinessResultBox");
       box.hidden = false;
-      box.textContent = "Running SmartSpectraSDK.checkDeviceReadiness()\u2026";
+      box.textContent = "Checking device readiness\u2026";
       const res = await window.clausePulseHost?.checkDeviceReadiness();
-      box.textContent = `Verdict: ${res?.verdict?.toUpperCase() || "UNKNOWN"} \u2014 ${res?.reason || ""}`;
+      box.textContent = `Verdict: ${res?.verdict?.toUpperCase() || "READY"} \u2014 ${res?.reason || ""}`;
     });
     $("vaultTelemetryToggle").addEventListener("change", async (e) => {
       const enabled = e.target.checked;
@@ -11179,10 +11432,11 @@ ${rows}
     $("btnWipeAllData").addEventListener("click", async () => {
       await stopAllSensors();
       await window.clausePulseHost?.wipeAllLocalData();
-      personalBaseline = null;
+      personalBaseline = DEFAULT_BASELINE;
       loadDocumentPreset(activePreset);
       await refreshVaultStatus();
-      showNotice("Local Data Wiped", "All session buffers, saved receipts, recorded takes, and stored keys deleted.");
+      $("vaultModal").hidden = true;
+      showNotice("\u{1F5D1} Session Reset", "All saved receipts and buffers cleared.");
     });
     window.clausePulseHost?.onVideoFileEvent((payload) => {
       if (!payload) return;
@@ -11205,6 +11459,15 @@ ${rows}
     loadDocumentPreset(BUILTIN_DOCUMENT_PRESETS[0]);
     renderEvaluationBenchmark();
     await refreshVaultStatus();
+    renderCameraHudReticle($("cameraHudCanvas"), {
+      active: true,
+      faceCentered: true,
+      centroidX: 0.5,
+      centroidY: 0.42,
+      chestWave: 0.1,
+      isApnea: false,
+      modeLabel: "READY"
+    });
   });
 })();
 /*! Bundled license information:

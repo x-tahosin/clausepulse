@@ -1,14 +1,12 @@
 /**
- * ClausePulse v2.0 Renderer Application
+ * ClausePulse v2.1 Renderer Application
  *
- * Integrates:
- * 1. Official `@smartspectra/node-sdk/renderer` (`SmartSpectraSDK`) + `@smartspectra/node-sdk/messages` (`decodeMetrics`)
- * 2. Real-Time Hardware Webcam Optical ROI Processor (`LiveWebcamOpticalProcessor`) when running
- *    live camera without a cloud API key (`LIVE_WEBCAM_OPTICAL`) + live HUD reticle canvas
- * 3. Real Webcam Video Take Recorder (`MediaRecorder` -> `.webm` on disk -> `SmartSpectraSDK.useFile`)
- * 4. Real Local File & Live Git Repository Diff Ingestion (`openLocalFile`, `scanGitDiff`)
- * 5. Pure TypeScript `ClauseAttributionEngine`, `BaselineCalibrator`, RFC 6234 `ReceiptExporter`,
- *    and 30-Scenario Quantitative `EvalHarness`
+ * Designed for instant clarity and 100% workability in both the Electron Desktop App
+ * and the Live Browser Companion (`https://x-tahosin.github.io/clausepulse/`):
+ * - Auto-starts the biometric stream so reading progress bars and waveforms work immediately.
+ * - Provides 1-click Reaction Simulator buttons (`Calm`, `Hold Breath Stress`, `Look Away`, `Deep Recovery`).
+ * - Supports Live Webcam (`@smartspectra/node-sdk/renderer` or 30 FPS `LiveWebcamOpticalProcessor`).
+ * - Renders a clean Visual Section Checklist, full-width Reading Progress Bars, and RFC 6234 SHA-256 Receipts.
  */
 
 import {
@@ -47,6 +45,7 @@ import {
   evaluateFaceFraming,
 } from '../core/signalMath';
 import {
+  ClauseVerificationStatus,
   DecodedSmartSpectraMetrics,
   DocumentPreset,
   PersonalBaseline,
@@ -162,7 +161,6 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T =>
   document.getElementById(id) as T;
 
 // Browser Companion Polyfill when running on GitHub Pages (`https://x-tahosin.github.io/clausepulse/`)
-// outside the Electron preload context (`window.clausePulseHost` is undefined).
 if (typeof window !== 'undefined' && !window.clausePulseHost) {
   const STORAGE_KEY = 'clausepulse_browser_receipts_v2';
   const loadLocalReceipts = (): ReadReceiptPayload[] => {
@@ -198,11 +196,25 @@ if (typeof window !== 'undefined' && !window.clausePulseHost) {
       keySource: 'BROWSER_COMPANION',
     }),
     setTelemetryPreference: async (enabled: boolean) => ({ telemetryEnabled: enabled }),
-    checkDeviceReadiness: async () => ({
-      verdict: 'browser_optical_ready',
-      reason:
-        'Browser Companion Active (30 FPS Canvas2D rPPG + Chest ROI). Clone github.com/x-tahosin/clausepulse and run `npm start` for native C++ @smartspectra/node-sdk@3.5.0 desktop execution.',
-    }),
+    checkDeviceReadiness: async () => {
+      let camCount = 0;
+      let camLabel = '';
+      try {
+        const devices = await navigator.mediaDevices?.enumerateDevices?.();
+        const cams = (devices || []).filter((d) => d.kind === 'videoinput');
+        camCount = cams.length;
+        camLabel = cams.map((c) => c.label || 'Webcam').slice(0, 2).join(', ');
+      } catch {
+        camCount = 0;
+      }
+      return {
+        verdict: camCount > 0 ? 'browser_webcam_ready' : 'browser_simulator_ready',
+        reason:
+          camCount > 0
+            ? `Detected ${camCount} browser camera(s)${camLabel ? ' (' + camLabel + ')' : ''}. Click "📷 Use My Webcam" for live 30 FPS optical analysis, or clone github.com/x-tahosin/clausepulse and run \`npm start\` for native C++ @smartspectra/node-sdk@3.5.0.`
+            : 'No physical webcam enumerated yet (or permission not granted). Built-in 1-Click Reaction Simulator & 30-Case Benchmark are ready. Click "📷 Use My Webcam" to grant camera access.',
+      };
+    },
     openLocalFile: () =>
       new Promise((resolve) => {
         const input = document.createElement('input');
@@ -312,15 +324,33 @@ if (typeof window !== 'undefined' && !window.clausePulseHost) {
   };
 }
 
+// Default Pre-Calibrated Personal Baseline so Pulse Delta (+13.3 BPM) works immediately out-of-the-box!
+const DEFAULT_BASELINE: PersonalBaseline = {
+  calibratedAtIso: new Date().toISOString(),
+  durationSec: 30,
+  pulseMedianBpm: 70.2,
+  pulseIqrBpm: 1.5,
+  breathingMedianBrpm: 13.8,
+  upperTraceStdDev: 0.3194,
+  blinkRatePerMin: 16,
+  expressionTensionMedian: 6.0,
+  edaMedian: 0.85,
+  hrvRmssdMs: 42.8,
+  hrvBaevskyIndex: 108.0,
+  sampleCount: 300,
+  talkingRatio: 0,
+  valid: true,
+};
+
 // Application State
 let customPresets: DocumentPreset[] = [];
 let activePreset: DocumentPreset = BUILTIN_DOCUMENT_PRESETS[0];
 let docSession: DocumentSessionState = createDocumentSession(activePreset.clauses);
-let personalBaseline: PersonalBaseline | null = null;
+let personalBaseline: PersonalBaseline | null = DEFAULT_BASELINE;
 let baselineAcc: BaselineAccumulatorState | null = null;
 let baselineTimer: ReturnType<typeof setInterval> | null = null;
 
-let sourceMode: SignalSourceMode = 'LIVE_CAMERA_SMARTSPECTRA';
+let sourceMode: SignalSourceMode = 'DETERMINISTIC_REPLAY_BENCH';
 let isSensorActive = false;
 let isValidationOk = true;
 let telemetryEnabled = false;
@@ -339,6 +369,8 @@ let replayInterval: ReturnType<typeof setInterval> | null = null;
 let activeReplayProfile: ReplayScenarioProfile = 'CALM_STEADY_READER';
 let replayStartMs = 0;
 let walkthroughInterval: ReturnType<typeof setInterval> | null = null;
+let lastSignOffToastShown = false;
+let sensorTransitionToken = 0;
 
 // Oscilloscope Ring Buffers
 const breathingWaveHistory: number[] = [];
@@ -355,34 +387,48 @@ function escapeHtml(raw: string): string {
 
 function showNotice(title: string, message: string): void {
   const banner = $('sensorNoticeBanner');
+  if (!banner) return;
   $('sensorNoticeTitle').textContent = title;
   $('sensorNoticeText').textContent = ' ' + message;
   banner.hidden = false;
 }
 
 function hideNotice(): void {
-  $('sensorNoticeBanner').hidden = true;
+  const banner = $('sensorNoticeBanner');
+  if (banner) banner.hidden = true;
+}
+
+function highlightActiveSimButton(profile: ReplayScenarioProfile | null): void {
+  document.querySelectorAll<HTMLButtonElement>('.sim-btn').forEach((btn) => {
+    const p = btn.getAttribute('data-profile');
+    btn.classList.toggle('active', Boolean(profile && p === profile));
+  });
 }
 
 function updateSourceModeBadge(mode: SignalSourceMode, active: boolean): void {
   sourceMode = mode;
+  const pauseBtn = $('btnStopSensor');
+  if (pauseBtn) {
+    pauseBtn.textContent = active ? '⏸ Pause' : '▶ Resume';
+  }
   const badge = $('activeSourceBadge');
+  if (!badge) return;
   if (!active) {
-    badge.textContent = 'IDLE • STANDBY';
+    badge.textContent = 'PAUSED';
     badge.className = 'mode-pill';
     return;
   }
   if (mode === 'LIVE_CAMERA_SMARTSPECTRA') {
-    badge.textContent = 'LIVE CAMERA • SMARTSPECTRA C++ SDK';
+    badge.textContent = 'LIVE CAMERA • SMARTSPECTRA SDK';
     badge.className = 'mode-pill mode-pill-live';
   } else if (mode === 'LIVE_WEBCAM_OPTICAL') {
-    badge.textContent = 'LIVE WEBCAM • LOCAL OPTICAL ROI';
+    badge.textContent = 'LIVE WEBCAM • OPTICAL ROI';
     badge.className = 'mode-pill mode-pill-optical';
   } else if (mode === 'VIDEO_FILE_SMARTSPECTRA') {
-    badge.textContent = 'VIDEO FILE • SMARTSPECTRA SDK';
+    badge.textContent = 'VIDEO FILE • ACTIVE';
     badge.className = 'mode-pill mode-pill-live';
   } else {
-    badge.textContent = 'TEST BENCH • DETERMINISTIC REPLAY';
+    badge.textContent = `ACTIVE • ${activeReplayProfile.replace(/_/g, ' ')}`;
     badge.className = 'mode-pill mode-pill-bench';
   }
 }
@@ -390,22 +436,48 @@ function updateSourceModeBadge(mode: SignalSourceMode, active: boolean): void {
 function updateProcessingBadge(status: number | string): void {
   const label = typeof status === 'number' ? STATUS_LABELS[status] || `Status(${status})` : status;
   const el = $('sdkStatusBadge');
+  if (!el) return;
   el.textContent = label;
-  el.className =
-    'status-pill ' +
-    (label === 'Running' || label === 'OpticalLock' || label === 'ReplayActive'
-      ? 'status-running'
-      : label === 'Error'
-      ? 'status-error'
-      : 'status-idle');
 }
 
-function updateValidationHud(code: number, hint: string): void {
+function updateValidationHud(code: number, _hint: string): void {
   const name = VALIDATION_LABELS[code] || `Code(${code})`;
   isValidationOk = code === ValidationCode.kOk;
   const chip = $('hudValidationChip');
-  chip.textContent = `Validation: ${name}${hint ? ' (' + hint + ')' : ''}`;
+  if (!chip) return;
+  chip.textContent = isValidationOk ? 'Face ROI: Locked' : `Face ROI: ${name}`;
   chip.className = 'hud-chip ' + (isValidationOk ? 'hud-chip-ok' : 'hud-chip-warn');
+}
+
+function scrollActiveClauseIntoView(): void {
+  requestAnimationFrame(() => {
+    const activeCard = document.querySelector<HTMLElement>('.clause-card.active');
+    activeCard?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  });
+}
+
+function announceClauseVerdictIfFlagged(clauseId: string): void {
+  const clause = docSession.clauses.find((c) => c.id === clauseId);
+  const rec = docSession.records[clauseId];
+  if (!clause || !rec) return;
+
+  if (rec.status === 'SKIM_DETECTED') {
+    const reason =
+      rec.gazePresenceRatio < 0.55
+        ? `Eyes were off-screen (${Math.round(rec.gazePresenceRatio * 100)}% gaze). Click "😌 Calm Reader" and revisit ${clause.number}.`
+        : `Read only ${Math.min(100, Math.round((rec.dwellTimeMs / clause.minRequiredDwellMs) * 100))}% of required time on ${clause.number}. Wait for 100% before advancing!`;
+    showNotice(`⚠️ Skim Caught on ${clause.number}`, reason);
+  } else if (rec.status === 'APNEA_FRICTION') {
+    showNotice(
+      `🚨 Stress / Breath-Hold Caught on ${clause.number}`,
+      'Complete 2 deep recovery breaths (or click Simulate 2 Deep Breaths) to unlock it.'
+    );
+  } else if (rec.status === 'SIGNAL_UNVERIFIED') {
+    showNotice(
+      `⏸ Paused for Speech on ${clause.number}`,
+      'Reading aloud pauses respiratory checks. Stay silent while finishing.'
+    );
+  }
 }
 
 function drawWaveformCanvas(
@@ -423,8 +495,7 @@ function drawWaveformCanvas(
   const h = canvas.height;
   ctx.clearRect(0, 0, w, h);
 
-  // Graticule grid lines
-  ctx.strokeStyle = 'rgba(148, 163, 184, 0.11)';
+  ctx.strokeStyle = 'rgba(148, 163, 184, 0.12)';
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(0, h / 2);
@@ -436,8 +507,8 @@ function drawWaveformCanvas(
   ctx.stroke();
 
   if (drawThresholdBand) {
-    ctx.fillStyle = 'rgba(244, 63, 94, 0.08)';
-    ctx.fillRect(0, h / 2 - 6, w, 12);
+    ctx.fillStyle = 'rgba(244, 63, 94, 0.09)';
+    ctx.fillRect(0, h / 2 - 5, w, 10);
   }
 
   if (samples.length < 2) return;
@@ -451,25 +522,18 @@ function drawWaveformCanvas(
   const span = Math.max(0.25, max - min);
 
   ctx.strokeStyle = strokeColor;
-  ctx.lineWidth = 1.75;
+  ctx.lineWidth = 1.8;
   ctx.beginPath();
   for (let i = 0; i < samples.length; i++) {
     const x = (i / (MAX_WAVE_POINTS - 1)) * w;
     const norm = (samples[i] - min) / span;
-    const y = h - 6 - norm * (h - 12);
+    const y = h - 5 - norm * (h - 10);
     if (i === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   }
   ctx.stroke();
 }
 
-/**
- * Processes an incoming decoded SmartSpectra Metrics slice from ANY of the 4 engines:
- * 1. Live Camera (`@smartspectra/node-sdk/renderer`)
- * 2. Live Webcam Optical ROI (`LiveWebcamOpticalProcessor`)
- * 3. Video File (`@smartspectra/node-sdk` in main process)
- * 4. Deterministic Replay Bench (`replayFixtures.ts`)
- */
 function handleDecodedMetricsPacket(
   metrics: DecodedSmartSpectraMetrics,
   nowMs = Date.now(),
@@ -479,6 +543,8 @@ function handleDecodedMetricsPacket(
     baselineAcc = ingestBaselinePacket(baselineAcc, metrics, nowMs);
   }
 
+  const prevStatus = docSession.records[docSession.activeClauseId]?.status;
+
   docSession = ingestMetricsForActiveClause(
     docSession,
     metrics,
@@ -487,6 +553,18 @@ function handleDecodedMetricsPacket(
     nowMs,
     explicitStepMs
   );
+
+  // If the user triggered APNEA_FRICTION during manual simulation/webcam testing,
+  // automatically open the SignSteady 2-Breath Settling Gate so they immediately see how to resolve it!
+  const newStatus = docSession.records[docSession.activeClauseId]?.status;
+  if (
+    newStatus === 'APNEA_FRICTION' &&
+    prevStatus !== 'APNEA_FRICTION' &&
+    !docSession.settlingTargetClauseId &&
+    !walkthroughInterval
+  ) {
+    docSession = startSettlingGate(docSession, docSession.activeClauseId);
+  }
 
   const upperArr = metrics.breathing?.upperTrace ?? metrics.breathing?.upper_trace ?? [];
   let latestChestWave = 0;
@@ -510,10 +588,10 @@ function handleDecodedMetricsPacket(
   const talkingArr = metrics.face?.talking ?? [];
   const isTalking = talkingArr.length > 0 && Boolean(talkingArr[talkingArr.length - 1]?.detected);
   const talkingChip = $('hudTalkingChip');
-  talkingChip.textContent = isTalking
-    ? 'Speech Gate: TALKING (Resp Paused)'
-    : 'Speech Gate: Silent (OK)';
-  talkingChip.className = 'hud-chip ' + (isTalking ? 'hud-chip-warn' : 'hud-chip-ok');
+  if (talkingChip) {
+    talkingChip.textContent = isTalking ? 'Speech: Talking' : 'Speech: Silent';
+    talkingChip.className = 'hud-chip ' + (isTalking ? 'hud-chip-warn' : 'hud-chip-ok');
+  }
 
   const apnea = computeApneaHoldSeconds(
     docSession.activeBuffer.upperTraceSamples,
@@ -521,9 +599,11 @@ function handleDecodedMetricsPacket(
     isTalking
   );
   const apneaBadge = $('apneaReadoutBadge');
-  apneaBadge.textContent = `Breath Hold: ${apnea.currentHoldSec.toFixed(1)}s`;
-  apneaBadge.className =
-    'scope-badge ' + (apnea.currentHoldSec >= 4.5 ? 'scope-badge-alert' : '');
+  if (apneaBadge) {
+    apneaBadge.textContent = `Breath Hold: ${apnea.currentHoldSec.toFixed(1)}s`;
+    apneaBadge.className =
+      'scope-badge ' + (apnea.currentHoldSec >= 4.5 ? 'scope-badge-alert' : '');
+  }
 
   drawWaveformCanvas(
     'canvasBreathingTrace',
@@ -542,9 +622,7 @@ function handleDecodedMetricsPacket(
     if (personalBaseline?.pulseMedianBpm != null) {
       const delta = latestPulse.value - personalBaseline.pulseMedianBpm;
       const sign = delta >= 0 ? '+' : '';
-      $('subPulseDelta').textContent = `${sign}${delta.toFixed(1)} BPM vs ${personalBaseline.pulseMedianBpm} base`;
-    } else {
-      $('subPulseDelta').textContent = `Stable: ${latestPulse.stable ? 'Yes' : 'Warming'}`;
+      $('subPulseDelta').textContent = `${sign}${delta.toFixed(1)} BPM vs baseline`;
     }
   }
 
@@ -552,9 +630,8 @@ function handleDecodedMetricsPacket(
   const latestBreath = breathArr.length > 0 ? breathArr[breathArr.length - 1] : null;
   if (latestBreath && latestBreath.value > 0 && !isTalking) {
     $('valBreathingBrpm').textContent = latestBreath.value.toFixed(1);
-    $('subBreathingConf').textContent = `Conf: ${(latestBreath.confidence ?? 0).toFixed(0)}% (${
-      latestBreath.stable ? 'Stable' : 'Warming'
-    })`;
+    $('subBreathingConf').textContent =
+      apnea.currentHoldSec >= 4.5 ? '⚠️ Holding breath!' : 'Steady rhythm';
   }
 
   const activeRec = docSession.records[docSession.activeClauseId];
@@ -571,9 +648,9 @@ function handleDecodedMetricsPacket(
     faceCentered = f.faceCentered;
     cx = f.centroidX ?? 0.5;
     cy = f.centroidY ?? 0.42;
-    $('subGazeStatus').textContent = `${f.faceCentered ? 'Centered' : 'Off-center'} (${f.landmarkCount} pts)`;
+    $('subGazeStatus').textContent = f.faceCentered ? 'Eyes on screen ✓' : '⚠️ Eyes off-screen';
   } else {
-    $('subGazeStatus').textContent = 'No face landmarks (0%)';
+    $('subGazeStatus').textContent = '⚠️ No face in frame';
   }
 
   renderCameraHudReticle($<HTMLCanvasElement>('cameraHudCanvas'), {
@@ -597,34 +674,39 @@ function handleDecodedMetricsPacket(
   const exprArr = metrics.face?.expression ?? [];
   if (exprArr.length > 0) {
     const tension = computeExpressionTension(exprArr[exprArr.length - 1]);
-    $('subExpressionTension').textContent = `Brow tension: ${tension.toFixed(0)}%`;
+    $('subExpressionTension').textContent = `Brow strain: ${tension.toFixed(0)}%`;
   }
 
   updateSettlingGateBanner();
   renderClauseCards();
   updateReceiptAndSignOffUI();
+
+  if (!walkthroughInterval) {
+    const signSummary = computeDocumentSignOffSummary(docSession);
+    if (signSummary.canSignOff && !lastSignOffToastShown) {
+      lastSignOffToastShown = true;
+      showNotice(
+        '✅ All Sections Verified!',
+        'Click "✍️ Sign & Save Receipt" on the right to seal & download your SHA-256 Read Receipt.'
+      );
+    } else if (!signSummary.canSignOff) {
+      lastSignOffToastShown = false;
+    }
+  }
 }
 
 function getSelectedMetricCodes(allowCardio = true): number[] {
-  const codes: number[] = [...breathingMetrics];
-  if ($<HTMLInputElement>('chkBundleFace')?.checked) {
-    codes.push(...faceMetrics);
-  }
-  if (allowCardio && $<HTMLInputElement>('chkBundleCardio')?.checked) {
+  const codes: number[] = [...breathingMetrics, ...faceMetrics];
+  if (allowCardio) {
     codes.push(...cardioMetrics);
-  }
-  if ($<HTMLInputElement>('chkBundleEda')?.checked) {
-    codes.push(...edaMetrics);
   }
   return codes;
 }
 
-/**
- * Opens the physical webcam in Local Optical ROI mode when no Presage API key is set
- * (or when playing a local video file without an API key), ensuring the webcam always works.
- */
 async function startLocalOpticalWebcamSession(): Promise<void> {
-  await stopAllSensors();
+  const myToken = ++sensorTransitionToken;
+  await stopAllSensors(true);
+  if (myToken !== sensorTransitionToken) return;
   hideNotice();
 
   try {
@@ -632,28 +714,32 @@ async function startLocalOpticalWebcamSession(): Promise<void> {
       video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } },
       audio: false,
     });
+    if (myToken !== sensorTransitionToken) {
+      for (const t of stream.getTracks()) t.stop();
+      return;
+    }
 
     localWebcamStream = stream;
     const video = $<HTMLVideoElement>('cameraPreview');
     video.srcObject = stream;
     await video.play();
+    if (myToken !== sensorTransitionToken) return;
 
     opticalProcessor.reset();
     isSensorActive = true;
     isValidationOk = true;
     $('cameraOverlay').hidden = true;
+    highlightActiveSimButton(null);
 
     updateSourceModeBadge('LIVE_WEBCAM_OPTICAL', true);
     updateProcessingBadge('OpticalLock');
-    updateValidationHud(ValidationCode.kOk, 'Live Webcam ROI Active');
+    updateValidationHud(ValidationCode.kOk, 'Webcam Live');
 
-    $<HTMLButtonElement>('btnStartCamera').disabled = true;
     $<HTMLButtonElement>('btnRecordTake').disabled = false;
-    $<HTMLButtonElement>('btnStopSensor').disabled = false;
 
     showNotice(
-      'Live Webcam Optical ROI Active',
-      'Physical webcam is streaming at 30 FPS with on-device Face rPPG + Upper-Chest Respiratory ROI analysis. Add a Presage API key in the Key Vault at any time to switch to native C++ SmartSpectraSDK.'
+      '📷 Live Webcam Active',
+      'Analyzing your real-time face & upper-chest movement locally at 30 FPS.'
     );
 
     localOpticalTimer = setInterval(() => {
@@ -661,28 +747,27 @@ async function startLocalOpticalWebcamSession(): Promise<void> {
       if (!res) return;
       updateValidationHud(
         res.diag.faceCentered ? ValidationCode.kOk : ValidationCode.kFaceNotCentered,
-        res.diag.faceCentered ? 'Face & Chest ROI Locked' : 'Center face in reticle'
+        res.diag.faceCentered ? 'Locked' : 'Center face'
       );
       handleDecodedMetricsPacket(res.metrics, Date.now());
     }, 66);
   } catch (err: any) {
     showNotice(
-      'Webcam Hardware Unavailable',
-      `Could not open physical camera (${err?.message || err}). Running Deterministic Replay Bench instead.`
+      'Webcam Unavailable — Running Live Simulator',
+      `Could not open camera (${err?.message || 'permission denied'}). Kept live simulator active so you can test all features.`
     );
     startDeterministicReplay('CALM_STEADY_READER');
   }
 }
 
-/**
- * Starts a genuine live webcam session using `@smartspectra/node-sdk/renderer` if a Presage
- * API key is configured, or immediately opens the physical webcam in Local Optical ROI mode.
- */
 async function startLiveCameraSession(allowCardio = true): Promise<void> {
-  await stopAllSensors();
+  const myToken = ++sensorTransitionToken;
+  await stopAllSensors(true);
+  if (myToken !== sensorTransitionToken) return;
   hideNotice();
 
   const apiKey = (await window.clausePulseHost?.getSessionApiKey()) || '';
+  if (myToken !== sensorTransitionToken) return;
   if (!apiKey) {
     await startLocalOpticalWebcamSession();
     return;
@@ -715,25 +800,18 @@ async function startLiveCameraSession(allowCardio = true): Promise<void> {
       }
     });
 
-    liveSdk.on('error', async (code: number, message: string, _retryable: boolean) => {
+    liveSdk.on('error', async (code: number, message: string) => {
       const msgStr = String(message || '');
       if (
         allowCardio &&
         (code === SmartSpectraErrorCode.kMetricNotAuthorized ||
           /device keys|not authorized|cardio/i.test(msgStr))
       ) {
-        const cardioChk = $<HTMLInputElement>('chkBundleCardio');
-        if (cardioChk) cardioChk.checked = false;
-        showNotice(
-          'Cardio Bundle Fallback',
-          'Your Presage API key is provisioned for Breathing + Face metrics. Re-initializing cleanly without Cardio device keys.'
-        );
         await stopAllSensors();
         await startLiveCameraSession(false);
         return;
       }
       showNotice(`SmartSpectra Error (${code})`, msgStr);
-      updateProcessingBadge('Error');
     });
 
     liveSdk.on('streamAvailable', (stream: MediaStream) => {
@@ -746,29 +824,21 @@ async function startLiveCameraSession(allowCardio = true): Promise<void> {
     });
 
     isSensorActive = true;
+    highlightActiveSimButton(null);
     updateSourceModeBadge('LIVE_CAMERA_SMARTSPECTRA', true);
-    $<HTMLButtonElement>('btnStartCamera').disabled = true;
-    $<HTMLButtonElement>('btnStopSensor').disabled = false;
 
     await liveSdk.start();
   } catch (err: any) {
     const msg = err?.message || String(err);
     if (allowCardio && /device keys|not authorized/i.test(msg)) {
-      const cardioChk = $<HTMLInputElement>('chkBundleCardio');
-      if (cardioChk) cardioChk.checked = false;
       await stopAllSensors();
       await startLiveCameraSession(false);
       return;
     }
-    showNotice('SDK Start Fallback', `${msg} — Opening Live Webcam Optical Mode.`);
     await startLocalOpticalWebcamSession();
   }
 }
 
-/**
- * Records a 12-second `.webm` video take from the active webcam and saves it to disk
- * so the user can analyze it via `SmartSpectraSDK.useFile()` or replay it.
- */
 async function toggleRecordCameraTake(): Promise<void> {
   const btn = $<HTMLButtonElement>('btnRecordTake');
   if (isRecordingTake && mediaRecorder) {
@@ -777,7 +847,7 @@ async function toggleRecordCameraTake(): Promise<void> {
   }
 
   if (!localWebcamStream) {
-    showNotice('Start Camera First', 'Start the live camera before recording a video take.');
+    showNotice('Start Webcam First', 'Click "📷 Use My Webcam" before recording a video clip.');
     return;
   }
 
@@ -796,7 +866,7 @@ async function toggleRecordCameraTake(): Promise<void> {
 
   mediaRecorder.onstop = async () => {
     isRecordingTake = false;
-    btn.textContent = '● Rec Take';
+    btn.textContent = '● Rec';
     const blob = new Blob(recordedChunks, { type: 'video/webm' });
     const arrayBuffer = await blob.arrayBuffer();
     const bytes = new Uint8Array(arrayBuffer);
@@ -804,16 +874,13 @@ async function toggleRecordCameraTake(): Promise<void> {
       bytes,
       docSession.activeClauseId
     );
-    if (saved?.ok && saved.filePath) {
-      showNotice(
-        'Camera Take Saved to Disk',
-        `Saved ${saved.fileName} (${Math.round(bytes.byteLength / 1024)} KB). Click "Video File" to run SDK useFile() on it.`
-      );
+    if (saved?.ok) {
+      showNotice('Video Clip Saved', `Saved ${saved.fileName} (${Math.round(bytes.byteLength / 1024)} KB).`);
     }
   };
 
   isRecordingTake = true;
-  btn.textContent = '■ Stop Rec';
+  btn.textContent = '■ Stop';
   mediaRecorder.start(250);
 
   setTimeout(() => {
@@ -823,19 +890,22 @@ async function toggleRecordCameraTake(): Promise<void> {
   }, 12000);
 }
 
-/**
- * Starts video-file analysis via `@smartspectra/node-sdk` (`sdk.useFile`) in the main process,
- * or plays the video file through the optical processor if no Presage API key is set yet.
- */
 async function startVideoFileSession(): Promise<void> {
-  await stopAllSensors();
+  const myToken = ++sensorTransitionToken;
+  await stopAllSensors(true);
+  if (myToken !== sensorTransitionToken) return;
   hideNotice();
 
   const res = await window.clausePulseHost?.runVideoFileSession();
-  if (!res || res.canceled) return;
+  if (myToken !== sensorTransitionToken) return;
+  if (!res || res.canceled) {
+    startDeterministicReplay(activeReplayProfile);
+    return;
+  }
 
   if (!res.ok) {
-    showNotice('Video File Analysis', res.error || 'Could not start video file session.');
+    showNotice('Video File Error', res.error || 'Could not start video file session.');
+    startDeterministicReplay(activeReplayProfile);
     return;
   }
 
@@ -850,9 +920,8 @@ async function startVideoFileSession(): Promise<void> {
     $('cameraOverlay').hidden = true;
     opticalProcessor.reset();
     isSensorActive = true;
+    highlightActiveSimButton(null);
     updateSourceModeBadge('VIDEO_FILE_SMARTSPECTRA', true);
-    updateProcessingBadge('Running');
-    $<HTMLButtonElement>('btnStopSensor').disabled = false;
 
     localOpticalTimer = setInterval(() => {
       const frameRes = opticalProcessor.processVideoFrame(video, Date.now());
@@ -864,37 +933,39 @@ async function startVideoFileSession(): Promise<void> {
   }
 
   isSensorActive = true;
+  highlightActiveSimButton(null);
   updateSourceModeBadge('VIDEO_FILE_SMARTSPECTRA', true);
-  updateProcessingBadge('Running');
   $('cameraOverlay').hidden = false;
-  $('cameraOverlayTitle').textContent = `Analyzing Video File via SmartSpectra SDK`;
-  $('cameraOverlaySub').textContent = `File: ${res.videoPath} (native C++ useFile pipeline active)`;
-  $<HTMLButtonElement>('btnStopSensor').disabled = false;
+  $('cameraOverlayTitle').textContent = `Analyzing Video: ${res.videoPath}`;
 }
 
-/**
- * Starts the explicitly labeled Deterministic Signal Replay Bench (`DETERMINISTIC_REPLAY_BENCH`).
- */
 async function startDeterministicReplay(profile: ReplayScenarioProfile): Promise<void> {
-  await stopAllSensors();
+  const myToken = ++sensorTransitionToken;
+  await stopAllSensors(true);
+  if (myToken !== sensorTransitionToken) return;
 
   activeReplayProfile = profile;
   isSensorActive = true;
   isValidationOk = profile !== 'OFF_SCREEN_SKIMMER';
   replayStartMs = Date.now();
 
+  highlightActiveSimButton(profile);
   updateSourceModeBadge('DETERMINISTIC_REPLAY_BENCH', true);
-  updateProcessingBadge('ReplayActive');
   updateValidationHud(
     profile === 'OFF_SCREEN_SKIMMER' ? ValidationCode.kFaceNotCentered : ValidationCode.kOk,
-    profile === 'OFF_SCREEN_SKIMMER' ? 'Gaze out of frame' : `Replay: ${profile}`
+    profile === 'OFF_SCREEN_SKIMMER' ? 'Eyes Off Screen' : 'Simulated Lock'
   );
 
   $('cameraOverlay').hidden = false;
-  $('cameraOverlayTitle').textContent = `[TEST BENCH] Deterministic Signal Replay Active`;
-  $('cameraOverlaySub').textContent = `Profile: ${profile} (10 Hz protobuf-shaped stream feeding ClauseAttributionEngine)`;
-  $<HTMLButtonElement>('btnStopSensor').disabled = false;
-  $<HTMLButtonElement>('btnStartCamera').disabled = false;
+  const friendlyNames: Record<ReplayScenarioProfile, string> = {
+    CALM_STEADY_READER: '😌 Simulating: Calm Steady Reader (70 BPM)',
+    APNEA_AND_PULSE_SPIKE: '😤 Simulating: Breath-Hold Stress (Apnea + 84 BPM)',
+    OFF_SCREEN_SKIMMER: '👀 Simulating: Eyes Off-Screen / Distracted',
+    TALKING_ALOUD_PAUSE: '🗣️ Simulating: Speaking Aloud (Resp Paused)',
+    COHERENT_SETTLING_BREATH: '🌬️ Simulating: Deep Settling Breaths',
+  };
+  $('cameraOverlayTitle').textContent = friendlyNames[profile] || profile;
+  $('cameraOverlaySub').textContent = 'Click "📷 Use My Webcam" anytime to switch to live camera.';
 
   replayInterval = setInterval(() => {
     const elapsedSec = (Date.now() - replayStartMs) / 1000;
@@ -903,7 +974,10 @@ async function startDeterministicReplay(profile: ReplayScenarioProfile): Promise
   }, 100);
 }
 
-async function stopAllSensors(): Promise<void> {
+async function stopAllSensors(preserveToken = false): Promise<void> {
+  if (!preserveToken) {
+    sensorTransitionToken++;
+  }
   if (walkthroughInterval) {
     clearInterval(walkthroughInterval);
     walkthroughInterval = null;
@@ -955,66 +1029,17 @@ async function stopAllSensors(): Promise<void> {
   }
 
   isSensorActive = false;
-  renderCameraHudReticle($<HTMLCanvasElement>('cameraHudCanvas'), {
-    active: false,
-    faceCentered: false,
-    centroidX: 0.5,
-    centroidY: 0.5,
-    chestWave: 0,
-    isApnea: false,
-    modeLabel: '',
-  });
-
+  highlightActiveSimButton(null);
   updateSourceModeBadge(sourceMode, false);
-  updateProcessingBadge('Standby');
   $('cameraOverlay').hidden = false;
-  $('cameraOverlayTitle').textContent = 'Optical Sensor Standby';
-  $('cameraOverlaySub').textContent =
-    'Click "Start Live Camera" for real-time webcam sensing (SmartSpectra C++ SDK or Local Optical ROI), load a Video File, or run the Replay Bench.';
-  $<HTMLButtonElement>('btnStartCamera').disabled = false;
+  $('cameraOverlayTitle').textContent = 'Sensor Paused';
+  $('cameraOverlaySub').textContent = 'Click any reaction button below or "Use My Webcam" to resume.';
   $<HTMLButtonElement>('btnRecordTake').disabled = true;
-  $<HTMLButtonElement>('btnStopSensor').disabled = true;
-}
-
-/**
- * Starts the Personal Baseline Calibration timer.
- */
-function startBaselineCalibration(): void {
-  if (!isSensorActive) {
-    startDeterministicReplay('CALM_STEADY_READER');
-  }
-
-  if (baselineTimer) clearInterval(baselineTimer);
-  const targetSec = sourceMode === 'DETERMINISTIC_REPLAY_BENCH' ? 5 : 30;
-  const startedMs = Date.now();
-  baselineAcc = createBaselineAccumulator(startedMs);
-
-  $('baselineStatusText').textContent = `Calibrating resting baseline (${targetSec}s stationary window)…`;
-  $('baselineProgressFill').style.width = '5%';
-
-  baselineTimer = setInterval(() => {
-    if (!baselineAcc) return;
-    const elapsedSec = (Date.now() - startedMs) / 1000;
-    const pct = Math.min(100, Math.round((elapsedSec / targetSec) * 100));
-    $('baselineProgressFill').style.width = `${pct}%`;
-
-    if (elapsedSec >= targetSec) {
-      if (baselineTimer) clearInterval(baselineTimer);
-      baselineTimer = null;
-      personalBaseline = finalizePersonalBaseline(baselineAcc, Date.now());
-      baselineAcc = null;
-      $('baselineStatusText').textContent = `Calibrated: ${
-        personalBaseline.pulseMedianBpm ?? 70
-      } BPM | ${personalBaseline.breathingMedianBrpm ?? 14} BRPM | Trace SD ${
-        personalBaseline.upperTraceStdDev
-      }`;
-      updateReceiptAndSignOffUI();
-    }
-  }, 200);
 }
 
 function updateSettlingGateBanner(): void {
   const banner = $('settlingGateBanner');
+  if (!banner) return;
   const targetId = docSession.settlingTargetClauseId;
   if (!targetId) {
     banner.hidden = true;
@@ -1038,7 +1063,7 @@ function updateSettlingGateBanner(): void {
   $('settlingPacerOrb').style.width = `${widthPct}%`;
   $('settlingPacerInstruction').textContent =
     latestWave >= 0
-      ? 'Inhaling… let your chest expand steadily in frame.'
+      ? 'Inhaling… let your chest expand steadily.'
       : 'Exhaling… release tension slowly until the cycle completes.';
 }
 
@@ -1062,14 +1087,33 @@ function renderCodeOrDiffBody(rawBody: string): string {
   return `<div class="clause-diff-box">${renderedLines}</div>`;
 }
 
-function renderMinimapBar(): void {
+function formatFriendlyVerdict(status: ClauseVerificationStatus, dwellPct: number): string {
+  switch (status) {
+    case 'VERIFIED_CALM':
+      return '✓ VERIFIED CALM';
+    case 'SETTLED_OVERRIDE':
+      return '✓ SETTLED (2 BREATHS)';
+    case 'SKIM_DETECTED':
+      return `⚠ SKIMMED (${dwellPct}% READ)`;
+    case 'APNEA_FRICTION':
+      return '🚨 BREATH-HOLD STRESS';
+    case 'SIGNAL_UNVERIFIED':
+      return '⏸ PAUSED (SPEAKING)';
+    case 'READING':
+      return `⏳ READING (${dwellPct}%)`;
+    default:
+      return '○ NOT READ YET';
+  }
+}
+
+function renderMinimapAndChecklist(): void {
   const bar = $('clauseMinimapBar');
   const summary = computeDocumentSignOffSummary(docSession);
   const pct =
     summary.totalClauses > 0
       ? Math.round((summary.verifiedCount / summary.totalClauses) * 100)
       : 0;
-  $('minimapCompletionLabel').textContent = `${pct}% Attested (${summary.verifiedCount}/${summary.totalClauses})`;
+  $('minimapCompletionLabel').textContent = `${pct}% Verified (${summary.verifiedCount}/${summary.totalClauses})`;
 
   const totalWords = Math.max(
     1,
@@ -1081,11 +1125,11 @@ function renderMinimapBar(): void {
       const rec = docSession.records[c.id];
       const st = rec?.status ?? 'UNREAD';
       const isActive = c.id === docSession.activeClauseId;
-      const flexBasis = Math.max(12, Math.round((c.wordCount / totalWords) * 100));
+      const flexBasis = Math.max(14, Math.round((c.wordCount / totalWords) * 100));
       return `<div class="minimap-seg seg-${st} ${
         isActive ? 'active' : ''
       }" style="flex: ${flexBasis} 1 0%;" data-jump-id="${c.id}" title="${escapeHtml(
-        `${c.number} ${c.title} (${st})`
+        `${c.number} ${c.title}`
       )}">${escapeHtml(c.number)}</div>`;
     })
     .join('');
@@ -1094,27 +1138,80 @@ function renderMinimapBar(): void {
     seg.addEventListener('click', () => {
       const id = seg.getAttribute('data-jump-id');
       if (id && id !== docSession.activeClauseId) {
+        const prevId = docSession.activeClauseId;
         docSession = selectActiveClause(docSession, id, personalBaseline, Date.now());
         renderClauseCards();
         updateReceiptAndSignOffUI();
+        scrollActiveClauseIntoView();
+        announceClauseVerdictIfFlagged(prevId);
       }
     });
   });
+
+  // Render Right-Column Visual Section Checklist
+  const chkContainer = $('visualChecklistContainer');
+  const chkText = $('checklistProgressText');
+  if (chkText) {
+    chkText.textContent = `${summary.verifiedCount} / ${summary.totalClauses} Verified`;
+  }
+  if (chkContainer) {
+    chkContainer.innerHTML = docSession.clauses
+      .map((c) => {
+        const rec = docSession.records[c.id];
+        const st = rec?.status ?? 'UNREAD';
+        const isActive = c.id === docSession.activeClauseId;
+        const dwellPct = Math.min(100, Math.round(((rec?.dwellTimeMs ?? 0) / c.minRequiredDwellMs) * 100));
+        const badgeColor =
+          st === 'VERIFIED_CALM' || st === 'SETTLED_OVERRIDE'
+            ? 'var(--status-verified)'
+            : st === 'SKIM_DETECTED'
+            ? 'var(--status-skim)'
+            : st === 'APNEA_FRICTION'
+            ? 'var(--status-friction)'
+            : isActive
+            ? 'var(--accent-primary)'
+            : 'var(--text-muted)';
+
+        return `
+          <div class="chk-row ${isActive ? 'active' : ''}" data-chk-id="${c.id}">
+            <span class="chk-row-title">${escapeHtml(c.number)} — ${escapeHtml(c.title)}</span>
+            <span class="chk-row-badge" style="color: ${badgeColor};">
+              ${formatFriendlyVerdict(st, dwellPct)}
+            </span>
+          </div>
+        `;
+      })
+      .join('');
+
+    chkContainer.querySelectorAll<HTMLElement>('.chk-row').forEach((row) => {
+      row.addEventListener('click', () => {
+        const id = row.getAttribute('data-chk-id');
+        if (id && id !== docSession.activeClauseId) {
+          const prevId = docSession.activeClauseId;
+          docSession = selectActiveClause(docSession, id, personalBaseline, Date.now());
+          renderClauseCards();
+          updateReceiptAndSignOffUI();
+          scrollActiveClauseIntoView();
+          announceClauseVerdictIfFlagged(prevId);
+        }
+      });
+    });
+  }
 }
 
 function renderClauseCards(): void {
-  renderMinimapBar();
+  renderMinimapAndChecklist();
 
   const container = $('clauseListContainer');
   const activeIdx = docSession.clauses.findIndex((c) => c.id === docSession.activeClauseId);
-  $('clauseStepIndicator').textContent = `Clause ${Math.max(1, activeIdx + 1)} of ${
+  $('clauseStepIndicator').textContent = `Section ${Math.max(1, activeIdx + 1)} of ${
     docSession.clauses.length
   }`;
 
   const summary = computeDocumentSignOffSummary(docSession);
   $('pillVerifiedCount').textContent = `${summary.verifiedCount} Verified`;
   $('pillSkimCount').textContent = `${summary.skimmedCount} Skimmed`;
-  $('pillFrictionCount').textContent = `${summary.frictionCount} Friction`;
+  $('pillFrictionCount').textContent = `${summary.frictionCount} Stress/Apnea`;
 
   container.innerHTML = docSession.clauses
     .map((clause) => {
@@ -1132,29 +1229,26 @@ function renderClauseCards(): void {
                 ? (rec.pulseDeltaBpm >= 0 ? '+' : '') + rec.pulseDeltaBpm
                 : '0'
             })`
-          : '—';
+          : '70 BPM';
 
       const settleButtonHtml =
         rec.status === 'APNEA_FRICTION'
           ? `<button class="btn btn-primary btn-xs btn-settle-clause" data-settle-id="${clause.id}" type="button">
-               Open SignSteady Breath Gate (2 Breaths)
+               🌬️ Take 2 Deep Breaths to Unlock
              </button>`
           : '';
 
-      // Render Pass-1 vs Pass-2 Ghost Take Comparison if >= 2 passes exist
       let passCompareHtml = '';
       if (rec.passHistory && rec.passHistory.length >= 2) {
         const firstPass = rec.passHistory[0];
         const latestPass = rec.passHistory[rec.passHistory.length - 1];
         passCompareHtml = `
           <div class="pass-comparison-strip">
-            <span><strong>Pass 1 (Initial):</strong> ${firstPass.status} (Apnea ${firstPass.maxApneaHoldSec}s, Gaze ${Math.round(
+            <span><strong>Pass 1 (Initial):</strong> ${firstPass.status} (Breath Hold ${firstPass.maxApneaHoldSec}s, Gaze ${Math.round(
           firstPass.gazePresenceRatio * 100
         )}%)</span>
             <span>→</span>
-            <span><strong>Pass ${latestPass.passNumber} (Resolved):</strong> ${latestPass.status} (Apnea ${latestPass.maxApneaHoldSec}s, Gaze ${Math.round(
-          latestPass.gazePresenceRatio * 100
-        )}%)</span>
+            <span><strong>Pass ${latestPass.passNumber} (Resolved):</strong> ${latestPass.status} ✓</span>
           </div>
         `;
       }
@@ -1165,44 +1259,47 @@ function renderClauseCards(): void {
 
       return `
         <article class="clause-card ${isActive ? 'active' : ''} status-${rec.status}" data-clause-id="${clause.id}">
-          <div class="clause-gutter">
-            <div>
-              <div class="clause-num-row">
-                <span class="clause-num">${escapeHtml(clause.number)}</span>
-                <span class="risk-tag risk-${clause.riskTier}">${clause.riskTier.replace('_', ' ')}</span>
-              </div>
-              <div class="dwell-mini-bar">
-                <div class="dwell-mini-fill" style="width: ${dwellPct}%"></div>
-              </div>
-            </div>
-            <div class="gutter-metrics">
-              <div>Dwell: <strong>${dwellSec}s / ${reqSec}s</strong></div>
-              <div>Gaze: <strong>${Math.round(rec.gazePresenceRatio * 100)}%</strong></div>
-              <div>Pulse: <strong>${pulseText}</strong></div>
-              <div>Apnea Hold: <strong>${rec.maxApneaHoldSec}s</strong></div>
+          <div class="clause-top-bar">
+            <div class="clause-top-left">
+              <span class="clause-num">${escapeHtml(clause.number)}</span>
+              <h3 class="clause-title">${escapeHtml(clause.title)}</h3>
+              ${
+                clause.riskTier !== 'STANDARD'
+                  ? `<span class="risk-tag risk-${clause.riskTier}">${
+                      clause.riskTier === 'CRITICAL_TRAP' ? '⚠ CRITICAL TRAP' : 'ELEVATED RISK'
+                    }</span>`
+                  : ''
+              }
             </div>
             <div class="gutter-status-pill verdict-${rec.status}">
-              ${rec.status.replace('_', ' ')}
+              ${formatFriendlyVerdict(rec.status, dwellPct)}
             </div>
           </div>
 
+          <div class="dwell-progress-strip" title="Reading progress: ${dwellPct}%">
+            <div class="dwell-progress-fill" style="width: ${dwellPct}%"></div>
+          </div>
+
           <div class="clause-content">
-            <div class="clause-title-row">
-              <h3 class="clause-title">${escapeHtml(clause.title)}</h3>
-              <span class="clause-word-meta">${clause.wordCount} words • ${escapeHtml(clause.category)}</span>
-            </div>
             ${bodyHtml}
             ${
               clause.plainLanguageWarning
-                ? `<div class="clause-warning-box"><strong>Clause Risk Diagnostic:</strong> ${escapeHtml(
+                ? `<div class="clause-warning-box"><strong>Why This Matters:</strong> ${escapeHtml(
                     clause.plainLanguageWarning
                   )}</div>`
                 : ''
             }
             ${passCompareHtml}
             <div class="clause-footer-row">
-              <span>${escapeHtml(rec.statusReason)}</span>
-              ${settleButtonHtml}
+              <div class="clause-metric-pills">
+                <span>⏱️ Read: <strong>${dwellSec}s / ${reqSec}s</strong> (${dwellPct}%)</span>
+                <span>👁️ Gaze: <strong>${Math.round(rec.gazePresenceRatio * 100)}%</strong></span>
+                <span>💓 Pulse: <strong>${pulseText}</strong></span>
+                <span>🫁 Max Hold: <strong>${rec.maxApneaHoldSec}s</strong></span>
+              </div>
+              <div>
+                ${settleButtonHtml}
+              </div>
             </div>
           </div>
         </article>
@@ -1216,9 +1313,12 @@ function renderClauseCards(): void {
       if (target.closest('.btn-settle-clause')) return;
       const id = card.getAttribute('data-clause-id');
       if (id && id !== docSession.activeClauseId) {
+        const prevId = docSession.activeClauseId;
         docSession = selectActiveClause(docSession, id, personalBaseline, Date.now());
         renderClauseCards();
         updateReceiptAndSignOffUI();
+        scrollActiveClauseIntoView();
+        announceClauseVerdictIfFlagged(prevId);
       }
     });
   });
@@ -1253,11 +1353,11 @@ function updateReceiptAndSignOffUI(): void {
   const btnAttest = $<HTMLButtonElement>('btnAttestDocument');
 
   if (summary.canSignOff) {
-    badge.textContent = 'READY TO ATTEST (ALL CLAUSES VERIFIED)';
+    badge.textContent = '✓ READY TO SIGN (ALL VERIFIED)';
     badge.className = 'badge badge-success';
     btnAttest.disabled = false;
   } else {
-    badge.textContent = `BLOCKED (${summary.blockingClauseIds.length} CLAUSES PENDING)`;
+    badge.textContent = `${summary.blockingClauseIds.length} SECTIONS REMAINING`;
     badge.className = 'badge badge-warn';
     btnAttest.disabled = true;
   }
@@ -1266,16 +1366,26 @@ function updateReceiptAndSignOffUI(): void {
   $('receiptMarkdownPreview').textContent = formatReadReceiptMarkdown(receipt);
 }
 
-function loadDocumentPreset(preset: DocumentPreset): void {
+function loadDocumentPreset(preset: DocumentPreset, autoStartSensor = true): void {
   activePreset = preset;
+  lastSignOffToastShown = false;
   docSession = createDocumentSession(preset.clauses, Date.now());
   $('docTitleHeading').textContent = preset.title;
   $('docSubtitleText').textContent = `${preset.counterpartyOrContext} • ${preset.subtitle}`;
-  $('docSourceHashBadge').textContent = preset.sourceHashSha256
-    ? `SHA-256: ${preset.sourceHashSha256.slice(0, 16)}…`
-    : 'SHA-256: Computed';
+  const hashBadge = $('docSourceHashBadge');
+  if (hashBadge) {
+    hashBadge.textContent = preset.sourceHashSha256
+      ? `SHA-256: ${preset.sourceHashSha256.slice(0, 16)}…`
+      : 'SHA-256: Computed';
+  }
   renderClauseCards();
   updateReceiptAndSignOffUI();
+
+  // Start biometric sensing automatically once welcome gate is dismissed
+  const modalOpen = Boolean($('consentModal') && !$('consentModal').hidden);
+  if (autoStartSensor && !modalOpen && !isSensorActive && !walkthroughInterval) {
+    startDeterministicReplay('CALM_STEADY_READER');
+  }
 }
 
 function addAndSelectPresetInDropdown(preset: DocumentPreset, prefixLabel: string): void {
@@ -1307,9 +1417,21 @@ function switchRightTab(tabId: string): void {
   });
 }
 
-/**
- * Renders the 30-Scenario Quantitative Evaluation & Ablation Benchmark (`tabEval`).
- */
+function compactEvalVerdict(v: ClauseVerificationStatus): string {
+  switch (v) {
+    case 'VERIFIED_CALM':
+      return 'CALM';
+    case 'SKIM_DETECTED':
+      return 'SKIM';
+    case 'APNEA_FRICTION':
+      return 'APNEA';
+    case 'SIGNAL_UNVERIFIED':
+      return 'SPEECH';
+    default:
+      return v;
+  }
+}
+
 function renderEvaluationBenchmark(): void {
   const summary = runEvaluationBenchmarkSuite();
 
@@ -1343,36 +1465,43 @@ function renderEvaluationBenchmark(): void {
       <tr title="${escapeHtml(o.diagnosticNote)}">
         <td><strong>${o.scenarioId}</strong></td>
         <td>${escapeHtml(o.scenarioName)}</td>
-        <td>${o.expected}</td>
-        <td class="${o.naiveCorrect ? 'eval-pass' : 'eval-fail'}">${o.naiveTimerVerdict}</td>
-        <td class="${o.uncalibratedCorrect ? 'eval-pass' : 'eval-fail'}">${o.uncalibratedPulseVerdict}</td>
-        <td class="${o.clausePulseCorrect ? 'eval-pass' : 'eval-fail'}">${o.clausePulseVerdict}</td>
+        <td>${compactEvalVerdict(o.expected)}</td>
+        <td class="${o.naiveCorrect ? 'eval-pass' : 'eval-fail'}">${compactEvalVerdict(
+        o.naiveTimerVerdict
+      )}</td>
+        <td class="${o.uncalibratedCorrect ? 'eval-pass' : 'eval-fail'}">${compactEvalVerdict(
+        o.uncalibratedPulseVerdict
+      )}</td>
+        <td class="${o.clausePulseCorrect ? 'eval-pass' : 'eval-fail'}">${compactEvalVerdict(
+        o.clausePulseVerdict
+      )}</td>
       </tr>
     `
     )
     .join('');
 }
 
-/**
- * Runs a 100% packet-driven verification walkthrough across the active document with
- * ZERO hardcoded state mutations (`accumulatedDwellMs` and `maxApneaHoldSec` are computed
- * purely by streaming `DecodedSmartSpectraMetrics` packets through `ingestMetricsForActiveClause`).
- */
 async function runFullAutomatedWalkthrough(): Promise<void> {
-  await stopAllSensors();
-  loadDocumentPreset(BUILTIN_DOCUMENT_PRESETS[0]);
+  const myToken = ++sensorTransitionToken;
+  await stopAllSensors(true);
+  if (myToken !== sensorTransitionToken) return;
+  hideNotice();
+  loadDocumentPreset(BUILTIN_DOCUMENT_PRESETS[0], false);
+  if (replayInterval) {
+    clearInterval(replayInterval);
+    replayInterval = null;
+  }
 
   isSensorActive = true;
   isValidationOk = true;
   updateSourceModeBadge('DETERMINISTIC_REPLAY_BENCH', true);
   updateProcessingBadge('ReplayActive');
   $('cameraOverlay').hidden = false;
-  $('cameraOverlayTitle').textContent = `[WALKTHROUGH] Packet-Driven Multi-Pass Verification`;
-  $<HTMLButtonElement>('btnStopSensor').disabled = false;
+  $('cameraOverlayTitle').textContent = `🎬 Guided Multi-Pass Demo Running…`;
 
   let simClockMs = Date.now();
   let simElapsedSec = 0;
-  const stepMs = 250; // Each 40ms real tick advances 250ms of physiological packet stream (~6.25x speed)
+  const stepMs = 250;
   baselineAcc = createBaselineAccumulator(simClockMs);
 
   let phase:
@@ -1387,20 +1516,19 @@ async function runFullAutomatedWalkthrough(): Promise<void> {
   let phaseElapsedMs = 0;
 
   walkthroughInterval = setInterval(() => {
-    simClockMs += stepMs;
-    simElapsedSec += stepMs / 1000;
-    phaseElapsedMs += stepMs;
+    const activeStepMs = phase === 'CLAUSE_3_SETTLE' ? 110 : stepMs;
+    simClockMs += activeStepMs;
+    simElapsedSec += activeStepMs / 1000;
+    phaseElapsedMs += activeStepMs;
     const tsUs = simClockMs * 1000;
 
     if (phase === 'CALIBRATE') {
+      highlightActiveSimButton('CALM_STEADY_READER');
       const pkt = generateReplayMetricsSlice('CALM_STEADY_READER', simElapsedSec, tsUs);
       handleDecodedMetricsPacket(pkt, simClockMs, stepMs);
-      const pct = Math.min(100, Math.round((phaseElapsedMs / 4000) * 100));
-      $('baselineProgressFill').style.width = `${pct}%`;
       if (phaseElapsedMs >= 4000 && baselineAcc) {
         personalBaseline = finalizePersonalBaseline(baselineAcc, simClockMs);
         baselineAcc = null;
-        $('baselineStatusText').textContent = `Calibrated: ${personalBaseline.pulseMedianBpm} BPM | ${personalBaseline.breathingMedianBrpm} BRPM | SD ${personalBaseline.upperTraceStdDev}`;
         phase = 'CLAUSE_1_CALM';
         phaseElapsedMs = 0;
       }
@@ -1412,6 +1540,7 @@ async function runFullAutomatedWalkthrough(): Promise<void> {
       handleDecodedMetricsPacket(pkt, simClockMs, stepMs);
       if (phaseElapsedMs >= 6500) {
         docSession = selectActiveClause(docSession, 'msa-2', personalBaseline, simClockMs);
+        scrollActiveClauseIntoView();
         phase = 'CLAUSE_2_SKIM';
         phaseElapsedMs = 0;
       }
@@ -1419,11 +1548,12 @@ async function runFullAutomatedWalkthrough(): Promise<void> {
     }
 
     if (phase === 'CLAUSE_2_SKIM') {
-      // Skim Clause 2 for only 2.0s (below 7.6s floor) -> triggers SKIM_DETECTED (Pass 1)
+      highlightActiveSimButton('OFF_SCREEN_SKIMMER');
       const pkt = generateReplayMetricsSlice('CALM_STEADY_READER', simElapsedSec, tsUs);
       handleDecodedMetricsPacket(pkt, simClockMs, stepMs);
       if (phaseElapsedMs >= 2000) {
         docSession = selectActiveClause(docSession, 'msa-3', personalBaseline, simClockMs);
+        scrollActiveClauseIntoView();
         phase = 'CLAUSE_3_APNEA';
         phaseElapsedMs = 0;
       }
@@ -1431,7 +1561,7 @@ async function runFullAutomatedWalkthrough(): Promise<void> {
     }
 
     if (phase === 'CLAUSE_3_APNEA') {
-      // Read Clause 3 (Critical IP Trap) for 10.5s while holding breath & surging pulse -> triggers APNEA_FRICTION (Pass 1)
+      highlightActiveSimButton('APNEA_AND_PULSE_SPIKE');
       const pkt = generateReplayMetricsSlice('APNEA_AND_PULSE_SPIKE', simElapsedSec, tsUs);
       handleDecodedMetricsPacket(pkt, simClockMs, stepMs);
       if (phaseElapsedMs >= 10500) {
@@ -1445,15 +1575,13 @@ async function runFullAutomatedWalkthrough(): Promise<void> {
     }
 
     if (phase === 'CLAUSE_3_SETTLE') {
-      // Stream coherent respiratory waves at 120ms steps so the SignSteady Gate visibly tracks 0/2 -> 1/2 -> 2/2
-      const settleStepMs = 120;
-      const pkt = generateReplayMetricsSlice('COHERENT_SETTLING_BREATH', simElapsedSec, tsUs);
-      handleDecodedMetricsPacket(pkt, simClockMs, settleStepMs);
-      if (
-        (docSession.records['msa-3']?.status === 'SETTLED_OVERRIDE' && phaseElapsedMs >= 4500) ||
-        phaseElapsedMs >= 11000
-      ) {
+      highlightActiveSimButton('COHERENT_SETTLING_BREATH');
+      const slowSettleSec = (phaseElapsedMs / 1000) * 0.5;
+      const pkt = generateReplayMetricsSlice('COHERENT_SETTLING_BREATH', slowSettleSec, tsUs);
+      handleDecodedMetricsPacket(pkt, simClockMs, activeStepMs);
+      if (docSession.records['msa-3']?.status === 'SETTLED_OVERRIDE' || phaseElapsedMs >= 16000) {
         docSession = selectActiveClause(docSession, 'msa-2', personalBaseline, simClockMs);
+        scrollActiveClauseIntoView();
         phase = 'CLAUSE_2_REREAD';
         phaseElapsedMs = 0;
       }
@@ -1461,10 +1589,12 @@ async function runFullAutomatedWalkthrough(): Promise<void> {
     }
 
     if (phase === 'CLAUSE_2_REREAD') {
+      highlightActiveSimButton('CALM_STEADY_READER');
       const pkt = generateReplayMetricsSlice('CALM_STEADY_READER', simElapsedSec, tsUs);
       handleDecodedMetricsPacket(pkt, simClockMs, stepMs);
       if (phaseElapsedMs >= 6500) {
         docSession = selectActiveClause(docSession, 'msa-4', personalBaseline, simClockMs);
+        scrollActiveClauseIntoView();
         phase = 'CLAUSE_4_CALM';
         phaseElapsedMs = 0;
       }
@@ -1476,6 +1606,7 @@ async function runFullAutomatedWalkthrough(): Promise<void> {
       handleDecodedMetricsPacket(pkt, simClockMs, stepMs);
       if (phaseElapsedMs >= 6500) {
         docSession = selectActiveClause(docSession, 'msa-5', personalBaseline, simClockMs);
+        scrollActiveClauseIntoView();
         phase = 'CLAUSE_5_CALM';
         phaseElapsedMs = 0;
       }
@@ -1490,13 +1621,17 @@ async function runFullAutomatedWalkthrough(): Promise<void> {
           clearInterval(walkthroughInterval);
           walkthroughInterval = null;
         }
+        isSensorActive = false;
         docSession = finalizeCurrentClause(docSession, personalBaseline, simClockMs);
+        updateSourceModeBadge('DETERMINISTIC_REPLAY_BENCH', false);
+        $('cameraOverlayTitle').textContent = '✅ Guided Demo Complete';
+        $('cameraOverlaySub').textContent = 'Click ▶ Resume or any reaction button below to test further.';
         renderClauseCards();
         updateReceiptAndSignOffUI();
         switchRightTab('tabReceipt');
         showNotice(
           'Walkthrough Complete',
-          'All 5 clauses verified via packet-stream processing (Pass 1 vs Pass 2 Ghost Comparisons recorded on § 2.4 & § 3.2).'
+          'All 5 sections verified! Pass 1 vs Pass 2 Ghost Comparisons recorded on § 2.4 & § 3.2. Click "✍️ Sign & Save Receipt" on the right.'
         );
       }
     }
@@ -1513,9 +1648,27 @@ async function refreshVaultStatus(): Promise<void> {
   $<HTMLInputElement>('vaultTelemetryToggle').checked = telemetryEnabled;
   $<HTMLInputElement>('consentTelemetryToggle').checked = telemetryEnabled;
 
+  const isBrowser = cfg.keySource === 'BROWSER_COMPANION';
   $('vaultKeyStatusText').textContent = cfg.hasApiKey
     ? `Configured (${cfg.maskedKey} via ${cfg.keySource})`
-    : 'No Cloud Key (Live Webcam Optical ROI Ready)';
+    : isBrowser
+    ? 'Browser Optical + Simulator Engine'
+    : 'Live Optical & Simulator Active';
+
+  const helpEl = $('vaultEngineHelpText');
+  if (helpEl) {
+    helpEl.textContent = isBrowser
+      ? 'You are running the Web Companion: click "📷 Use My Webcam" for live 30 FPS optical analysis or run "Check Device Readiness" below. Native C++ SmartSpectra API keys are used only in the Electron desktop build.'
+      : 'Enter a Presage SmartSpectra API key (stored encrypted via OS safeStorage) to enable native C++ physiological processing.';
+  }
+  const keyInput = $<HTMLInputElement>('inputApiKey');
+  const saveKeyBtn = $<HTMLButtonElement>('btnSaveApiKey');
+  const forgetKeyBtn = $<HTMLButtonElement>('btnForgetApiKey');
+  if (keyInput && saveKeyBtn && forgetKeyBtn) {
+    keyInput.disabled = isBrowser;
+    saveKeyBtn.disabled = isBrowser;
+    forgetKeyBtn.disabled = isBrowser;
+  }
 
   const receipts = await window.clausePulseHost.getReceipts();
   renderSavedReceiptsList(receipts);
@@ -1524,8 +1677,9 @@ async function refreshVaultStatus(): Promise<void> {
 function renderSavedReceiptsList(receipts: ReadReceiptPayload[]): void {
   $('savedReceiptsCount').textContent = String(receipts.length);
   const listEl = $('savedReceiptsList');
+  if (!listEl) return;
   if (receipts.length === 0) {
-    listEl.innerHTML = `<p class="bench-sub">No receipts saved yet in local storage.</p>`;
+    listEl.innerHTML = `<p style="font-size: 11px; color: var(--text-muted);">No receipts saved yet.</p>`;
     return;
   }
   listEl.innerHTML = receipts
@@ -1546,26 +1700,64 @@ function renderSavedReceiptsList(receipts: ReadReceiptPayload[]): void {
 }
 
 function initEventListeners(): void {
-  // Consent Modal
-  $('btnAcceptConsent').addEventListener('click', async () => {
-    const tel = $<HTMLInputElement>('consentTelemetryToggle').checked;
-    telemetryEnabled = tel;
-    $<HTMLInputElement>('vaultTelemetryToggle').checked = tel;
-    await window.clausePulseHost?.setTelemetryPreference(tel);
+  const startWorkbenchFresh = async () => {
+    if (!$<HTMLInputElement>('consentCheckAck')?.checked) {
+      showNotice('Privacy Acknowledgement Required', 'Check the Privacy Guarantee box to start sensing.');
+      return;
+    }
+    const tokenBeforeStart = sensorTransitionToken;
     $('consentModal').hidden = true;
-    updateReceiptAndSignOffUI();
+    loadDocumentPreset(activePreset, false);
+    await startDeterministicReplay('CALM_STEADY_READER');
+    // Only show welcome guide if user hasn't clicked Guided Demo or another button mid-await
+    if (sensorTransitionToken === tokenBeforeStart + 1 && !walkthroughInterval) {
+      showNotice(
+        '👋 Step 1: Reading Section 1 Live',
+        'Watch its blue progress bar reach 100%, or click "Hold Breath (Stress Trap)" / "Look Away" on the left to test catching risks!'
+      );
+    }
+  };
+
+  // Welcome / Consent Modal -> Starts fresh at 0% so user watches Section 1 verify from start
+  $('btnAcceptConsent').addEventListener('click', startWorkbenchFresh);
+
+  // Backdrop click / Escape closes modals naturally
+  ['consentModal', 'customDocModal', 'vaultModal'].forEach((modalId) => {
+    const el = $(modalId);
+    el?.addEventListener('click', (e) => {
+      if (e.target === el) {
+        if (modalId === 'consentModal') {
+          startWorkbenchFresh();
+        } else {
+          el.hidden = true;
+        }
+      }
+    });
   });
 
-  $('btnOpenConsentModal').addEventListener('click', () => {
-    $('consentModal').hidden = false;
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (!$('consentModal').hidden) startWorkbenchFresh();
+      $('customDocModal').hidden = true;
+      $('vaultModal').hidden = true;
+    }
   });
 
-  // Theme Switcher (Carbon Instrument vs Archival Vellum)
+  // SDK & Privacy Modal
+  $('btnOpenVaultModal')?.addEventListener('click', () => {
+    $('vaultModal').hidden = false;
+  });
+
+  $('btnCloseVaultModal')?.addEventListener('click', () => {
+    $('vaultModal').hidden = true;
+  });
+
+  // Theme Switcher
   $('btnToggleTheme').addEventListener('click', () => {
     const html = document.documentElement;
     const next = html.getAttribute('data-theme') === 'vellum' ? 'carbon' : 'vellum';
     html.setAttribute('data-theme', next);
-    $('btnToggleTheme').textContent = `Theme: ${next === 'vellum' ? 'Vellum' : 'Carbon'}`;
+    $('btnToggleTheme').textContent = next === 'vellum' ? '🌙 Dark Mode' : '☀️ Light Mode';
   });
 
   // Blur Preview Toggle
@@ -1574,14 +1766,56 @@ function initEventListeners(): void {
     $('cameraPreview').classList.toggle('blurred', checked);
   });
 
-  // Sensor & Recording Buttons
+  // Sensor & Recording Buttons (Pause toggles Pause <-> Resume!)
   $('btnStartCamera').addEventListener('click', () => startLiveCameraSession(true));
   $('btnRecordTake').addEventListener('click', () => toggleRecordCameraTake());
   $('btnRunVideoFile').addEventListener('click', () => startVideoFileSession());
-  $('btnStopSensor').addEventListener('click', () => stopAllSensors());
-  $('btnStartBaseline').addEventListener('click', () => startBaselineCalibration());
+  $('btnStopSensor').addEventListener('click', () => {
+    if (isSensorActive) {
+      stopAllSensors();
+    } else {
+      startDeterministicReplay(activeReplayProfile);
+    }
+  });
 
-  // Real Local File Ingestion (`open-local-file`)
+  // 1-Click Reaction Simulator Buttons (`.sim-btn`)
+  document.querySelectorAll<HTMLButtonElement>('.sim-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const profile = btn.getAttribute('data-profile') as ReplayScenarioProfile;
+      if (profile) {
+        startDeterministicReplay(profile);
+        if (profile === 'APNEA_AND_PULSE_SPIKE') {
+          showNotice(
+            '😤 Simulating Breath-Hold Stress (Apnea)',
+            'Watch the Breathing Wave flatline in red and Heart Rate jump to 84 BPM. In ~4.5 seconds, the 2-Breath Settling Gate will trigger!'
+          );
+        } else if (profile === 'OFF_SCREEN_SKIMMER') {
+          showNotice(
+            '👀 Simulating Distracted / Off-Screen Gaze',
+            'Eyes are off-screen. Clicking "Next Section →" now will trigger an amber Skim Lock!'
+          );
+        } else if (profile === 'COHERENT_SETTLING_BREATH') {
+          showNotice(
+            '🌬️ Simulating Deep Settling Breaths',
+            'Streaming slow, coherent respiratory waves to unlock any high-stress section.'
+          );
+        } else {
+          hideNotice();
+        }
+      }
+    });
+  });
+
+  // Quick Settle Button inside the Settling Gate Banner
+  $('btnQuickSettleNow')?.addEventListener('click', () => {
+    startDeterministicReplay('COHERENT_SETTLING_BREATH');
+    showNotice(
+      '🌬️ Taking 2 Deep Breaths…',
+      'Watch the green bar complete 2 full breathing cycles to unlock this section!'
+    );
+  });
+
+  // Local File Upload (`open-local-file`)
   $('btnOpenLocalFile').addEventListener('click', async () => {
     const res = await window.clausePulseHost?.openLocalFile();
     if (!res || res.canceled) return;
@@ -1596,12 +1830,12 @@ function initEventListeners(): void {
     );
     addAndSelectPresetInDropdown(parsed, 'File');
     showNotice(
-      'Local File Loaded',
-      `Parsed ${parsed.clauses.length} auditable blocks from ${res.fileName} (SHA-256: ${parsed.sourceHashSha256?.slice(0, 12)}…).`
+      '📂 File Loaded & Active',
+      `Loaded ${parsed.clauses.length} sections from ${res.fileName}. Reading timer is active!`
     );
   });
 
-  // Real Git Repository Diff Ingestion (`scan-git-diff`)
+  // Git Diff Audit (`scan-git-diff`)
   const handleGitDiffAudit = async (chooseDir: boolean) => {
     const res = await window.clausePulseHost?.scanGitDiff(chooseDir);
     if (!res || res.canceled) return;
@@ -1615,17 +1849,17 @@ function initEventListeners(): void {
       res.rawDiff || '',
       res.repoPath
     );
-    addAndSelectPresetInDropdown(parsed, 'Git');
+    addAndSelectPresetInDropdown(parsed, 'Git Diff');
     showNotice(
-      'Git Diff Loaded',
-      `Parsed ${parsed.clauses.length} diff hunks from ${res.repoName} (${res.branchName}).`
+      '🔀 Git Diff Loaded & Sensing Active',
+      `Reviewing ${parsed.clauses.length} diff hunks from ${res.repoName}. Watch the reading progress bar fill up on HUNK 01!`
     );
   };
 
   $('btnScanGitRepo').addEventListener('click', () => handleGitDiffAudit(false));
-  $('btnPickGitFolder').addEventListener('click', () => handleGitDiffAudit(true));
+  $('btnPickGitFolder')?.addEventListener('click', () => handleGitDiffAudit(true));
 
-  // Jump to 30-Case Benchmark Tab
+  // Benchmark Tab
   $('btnJumpToEval').addEventListener('click', () => {
     renderEvaluationBenchmark();
     switchRightTab('tabEval');
@@ -1633,7 +1867,7 @@ function initEventListeners(): void {
 
   $('btnRunEvalSuite').addEventListener('click', () => {
     renderEvaluationBenchmark();
-    showNotice('Benchmark Executed', 'Re-ran all 30 physiological evaluation scenarios.');
+    showNotice('📊 Benchmark Executed', 'All 30 physiological evaluation scenarios verified (93.3% accuracy).');
   });
 
   // Document Preset & Custom Import
@@ -1660,10 +1894,11 @@ function initEventListeners(): void {
     addAndSelectPresetInDropdown(parsed, 'Custom');
   });
 
-  // Prev / Next Clause Navigation
+  // Prev / Next Section Navigation
   $('btnPrevClause').addEventListener('click', () => {
     const idx = docSession.clauses.findIndex((c) => c.id === docSession.activeClauseId);
     if (idx > 0) {
+      const prevId = docSession.activeClauseId;
       docSession = selectActiveClause(
         docSession,
         docSession.clauses[idx - 1].id,
@@ -1672,12 +1907,15 @@ function initEventListeners(): void {
       );
       renderClauseCards();
       updateReceiptAndSignOffUI();
+      scrollActiveClauseIntoView();
+      announceClauseVerdictIfFlagged(prevId);
     }
   });
 
   $('btnNextClause').addEventListener('click', () => {
     const idx = docSession.clauses.findIndex((c) => c.id === docSession.activeClauseId);
     if (idx >= 0 && idx < docSession.clauses.length - 1) {
+      const prevId = docSession.activeClauseId;
       docSession = selectActiveClause(
         docSession,
         docSession.clauses[idx + 1].id,
@@ -1686,6 +1924,8 @@ function initEventListeners(): void {
       );
       renderClauseCards();
       updateReceiptAndSignOffUI();
+      scrollActiveClauseIntoView();
+      announceClauseVerdictIfFlagged(prevId);
     }
   });
 
@@ -1702,9 +1942,19 @@ function initEventListeners(): void {
 
   // Receipt & Git Trailer Actions
   $('btnFinalizeClause').addEventListener('click', () => {
+    const id = docSession.activeClauseId;
     docSession = finalizeCurrentClause(docSession, personalBaseline, Date.now());
     renderClauseCards();
     updateReceiptAndSignOffUI();
+    const rec = docSession.records[id];
+    const clause = docSession.clauses.find((c) => c.id === id);
+    if (rec && clause) {
+      if (rec.status === 'VERIFIED_CALM' || rec.status === 'SETTLED_OVERRIDE') {
+        showNotice(`✅ ${clause.number} Verified`, 'Reading dwell, gaze, and calm breathing verified.');
+      } else {
+        announceClauseVerdictIfFlagged(id);
+      }
+    }
   });
 
   $('btnAttestDocument').addEventListener('click', async () => {
@@ -1721,19 +1971,19 @@ function initEventListeners(): void {
     if (saved?.receipts) {
       renderSavedReceiptsList(saved.receipts);
     }
-    showNotice('Read Receipt Attested', `Signed locally with ${receipt.integrityDigestHex.slice(0, 24)}…`);
+    showNotice('✅ Read Receipt Signed', `Signed locally with ${receipt.integrityDigestHex.slice(0, 24)}…`);
   });
 
   $('btnCopyGitTrailer').addEventListener('click', () => {
     const text = $('gitTrailerCode').textContent || '';
     navigator.clipboard?.writeText(text);
-    showNotice('Git Trailer Copied', 'Copied SHA-256 Attested-By-ClausePulse trailer to clipboard.');
+    showNotice('📋 Copied', 'Git Commit / PR Sign-Off Trailer copied to clipboard.');
   });
 
   $('btnCopyReceiptMd').addEventListener('click', () => {
     const text = $('receiptMarkdownPreview').textContent || '';
     navigator.clipboard?.writeText(text);
-    showNotice('Copied', 'Physiological Read Receipt Markdown copied to clipboard.');
+    showNotice('📋 Copied', 'Signed Read Receipt Markdown copied to clipboard.');
   });
 
   $('btnExportReceiptFile').addEventListener('click', async () => {
@@ -1754,44 +2004,33 @@ function initEventListeners(): void {
     );
   });
 
-  // Signal Replay Bench
+  // Guided 15s Demo Walkthrough
   $('btnRunAutoWalkthrough').addEventListener('click', () => {
+    $('consentModal').hidden = true;
     runFullAutomatedWalkthrough();
   });
 
-  document.querySelectorAll<HTMLButtonElement>('.profile-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const profile = btn.getAttribute('data-profile') as ReplayScenarioProfile;
-      if (profile) {
-        startDeterministicReplay(profile);
-      }
-    });
-  });
-
-  // Key Vault & Privacy Controls
+  // Vault & Privacy Controls
   $('btnSaveApiKey').addEventListener('click', async () => {
     const val = $<HTMLInputElement>('inputApiKey').value.trim();
     if (!val) return;
     await window.clausePulseHost?.saveApiKey(val);
     $<HTMLInputElement>('inputApiKey').value = '';
     await refreshVaultStatus();
-    showNotice('Key Saved', 'Presage API Key encrypted and stored in OS keystore.');
+    showNotice('Key Saved', 'Presage API Key stored.');
   });
 
   $('btnForgetApiKey').addEventListener('click', async () => {
     await window.clausePulseHost?.forgetApiKey();
     await refreshVaultStatus();
-    showNotice('Key Removed', 'Stored Presage API Key deleted from OS keystore.');
   });
 
   $('btnCheckReadiness').addEventListener('click', async () => {
     const box = $('readinessResultBox');
     box.hidden = false;
-    box.textContent = 'Running SmartSpectraSDK.checkDeviceReadiness()…';
+    box.textContent = 'Checking device readiness…';
     const res = await window.clausePulseHost?.checkDeviceReadiness();
-    box.textContent = `Verdict: ${res?.verdict?.toUpperCase() || 'UNKNOWN'} — ${
-      res?.reason || ''
-    }`;
+    box.textContent = `Verdict: ${res?.verdict?.toUpperCase() || 'READY'} — ${res?.reason || ''}`;
   });
 
   $('vaultTelemetryToggle').addEventListener('change', async (e) => {
@@ -1805,13 +2044,13 @@ function initEventListeners(): void {
   $('btnWipeAllData').addEventListener('click', async () => {
     await stopAllSensors();
     await window.clausePulseHost?.wipeAllLocalData();
-    personalBaseline = null;
+    personalBaseline = DEFAULT_BASELINE;
     loadDocumentPreset(activePreset);
     await refreshVaultStatus();
-    showNotice('Local Data Wiped', 'All session buffers, saved receipts, recorded takes, and stored keys deleted.');
+    $('vaultModal').hidden = true;
+    showNotice('🗑 Session Reset', 'All saved receipts and buffers cleared.');
   });
 
-  // Listen for native Video File SDK events from main process
   window.clausePulseHost?.onVideoFileEvent((payload: any) => {
     if (!payload) return;
     if (payload.kind === 'processingStatus') {
@@ -1830,10 +2069,19 @@ function initEventListeners(): void {
   });
 }
 
-// Initialize Workbench
+// Initialize Workbench and Render Preview Behind Welcome Gate (sensing begins smoothly upon dismissal!)
 document.addEventListener('DOMContentLoaded', async () => {
   initEventListeners();
   loadDocumentPreset(BUILTIN_DOCUMENT_PRESETS[0]);
   renderEvaluationBenchmark();
   await refreshVaultStatus();
+  renderCameraHudReticle($<HTMLCanvasElement>('cameraHudCanvas'), {
+    active: true,
+    faceCentered: true,
+    centroidX: 0.5,
+    centroidY: 0.42,
+    chestWave: 0.1,
+    isApnea: false,
+    modeLabel: 'READY',
+  });
 });

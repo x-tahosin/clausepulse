@@ -378,6 +378,9 @@ export function parseCustomDocumentIntoClauses(
   sourcePath?: string
 ): DocumentPreset {
   const cleanTitle = title.trim() || 'Custom Audited Document';
+  if (/^diff --git /m.test(rawText)) {
+    return parseGitDiffIntoPreset(cleanTitle, 'pasted-diff', rawText, sourcePath);
+  }
   const sourceHashSha256 = sha256Hex(rawText);
   const isCodeFile = Boolean(
     sourcePath && /\.(sql|ts|js|py|json|yaml|yml|diff|patch|sh)$/i.test(sourcePath)

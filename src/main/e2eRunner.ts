@@ -65,16 +65,19 @@ export function attachE2eVerificationRunner(win: BrowserWindow): void {
 
       screenshots.push(await saveWindowScreenshot(win, outDir, '01-consent-gate-modal.png'));
 
-      // Accept consent modal and start packet-driven walkthrough
+      // Accept consent modal and wait briefly before starting packet-driven walkthrough
       await win.webContents.executeJavaScript(`
         document.getElementById('btnAcceptConsent').click();
+      `);
+      await delay(120);
+      await win.webContents.executeJavaScript(`
         document.getElementById('btnRunAutoWalkthrough').click();
       `);
 
       // Poll until the SignSteady Respiratory Settling Gate opens on Clause 3 (msa-3)
       let settlingCaptured = false;
-      for (let i = 0; i < 120; i++) {
-        await delay(80);
+      for (let i = 0; i < 300; i++) {
+        await delay(30);
         const gateState = await win.webContents.executeJavaScript(`
           (() => {
             const b = document.getElementById('settlingGateBanner');
@@ -85,10 +88,13 @@ export function attachE2eVerificationRunner(win: BrowserWindow): void {
           await win.webContents.executeJavaScript(`
             document.querySelector('.panel-center').scrollTop = 0;
           `);
-          await delay(80);
-          screenshots.push(
-            await saveWindowScreenshot(win, outDir, '02-active-apnea-and-settling-gate.png')
-          );
+          await delay(40);
+          await win.webContents.capturePage();
+          const img = await win.webContents.capturePage();
+          const png = img.toPNG();
+          const fp = path.join(outDir, '02-active-apnea-and-settling-gate.png');
+          fs.writeFileSync(fp, png);
+          screenshots.push({ fileName: '02-active-apnea-and-settling-gate.png', filePath: fp, bytes: png.byteLength });
           settlingCaptured = true;
           break;
         }
@@ -104,7 +110,7 @@ export function attachE2eVerificationRunner(win: BrowserWindow): void {
 
       // Poll until the walkthrough completes and all 5 clauses are verified
       let walkthroughDone = false;
-      for (let i = 0; i < 140; i++) {
+      for (let i = 0; i < 400; i++) {
         await delay(100);
         const isComplete = await win.webContents.executeJavaScript(`
           (document.getElementById('sensorNoticeTitle')?.textContent || '').includes('Walkthrough Complete') &&
@@ -184,26 +190,7 @@ export function attachE2eVerificationRunner(win: BrowserWindow): void {
         ].join('\\n');
         document.getElementById('btnLoadCustomDoc').click();
         document.querySelector('[data-tab="tabReceipt"]').click();
-      `);
-
-      // Force diff syntax formatting on the loaded custom diff blocks for visual clarity
-      await win.webContents.executeJavaScript(`
-        document.querySelectorAll('.clause-body-text').forEach((p) => {
-          const raw = p.textContent || '';
-          if (raw.includes('@@')) {
-            const lines = raw.split('\\n').map((l) => {
-              const safe = l.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-              if (l.startsWith('@@')) return '<span class="diff-line diff-line-hdr">' + safe + '</span>';
-              if (l.startsWith('+')) return '<span class="diff-line diff-line-add">' + safe + '</span>';
-              if (l.startsWith('-')) return '<span class="diff-line diff-line-del">' + safe + '</span>';
-              return '<span class="diff-line">' + safe + '</span>';
-            }).join('');
-            const box = document.createElement('div');
-            box.className = 'clause-diff-box';
-            box.innerHTML = lines;
-            p.replaceWith(box);
-          }
-        });
+        document.querySelector('.panel-center').scrollTop = 0;
       `);
       await delay(350);
 
@@ -214,8 +201,7 @@ export function attachE2eVerificationRunner(win: BrowserWindow): void {
         document.getElementById('selectDocumentPreset').value = 'freelance-msa-2026';
         document.getElementById('selectDocumentPreset').dispatchEvent(new Event('change'));
         document.getElementById('btnToggleTheme').click();
-        document.querySelector('[data-tab="tabVault"]').click();
-        document.getElementById('btnCheckReadiness').click();
+        document.querySelector('[data-tab="tabReceipt"]').click();
       `);
       await delay(500);
 

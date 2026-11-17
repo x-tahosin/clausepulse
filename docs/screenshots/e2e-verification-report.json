@@ -1,5 +1,5 @@
 {
-  "executedAtIso": "2026-11-17T18:57:26.110Z",
+  "executedAtIso": "2026-11-17T20:15:32.564Z",
   "windowDimensions": "1440x900",
   "consoleErrorCount": 0,
   "consoleErrors": [],
@@ -35,32 +35,32 @@
     {
       "fileName": "01-consent-gate-modal.png",
       "filePath": "C:\\Users\\xtaho\\Desktop\\Dev Engine\\contests\\clausepulse\\docs\\screenshots\\01-consent-gate-modal.png",
-      "bytes": 63525
+      "bytes": 71426
     },
     {
       "fileName": "02-active-apnea-and-settling-gate.png",
       "filePath": "C:\\Users\\xtaho\\Desktop\\Dev Engine\\contests\\clausepulse\\docs\\screenshots\\02-active-apnea-and-settling-gate.png",
-      "bytes": 111988
+      "bytes": 94948
     },
     {
       "fileName": "03-pass2-settled-and-sha256-receipt.png",
       "filePath": "C:\\Users\\xtaho\\Desktop\\Dev Engine\\contests\\clausepulse\\docs\\screenshots\\03-pass2-settled-and-sha256-receipt.png",
-      "bytes": 128916
+      "bytes": 101725
     },
     {
       "fileName": "04-30-case-ablation-benchmark.png",
       "filePath": "C:\\Users\\xtaho\\Desktop\\Dev Engine\\contests\\clausepulse\\docs\\screenshots\\04-30-case-ablation-benchmark.png",
-      "bytes": 127286
+      "bytes": 102650
     },
     {
       "fileName": "05-live-git-diff-audit.png",
       "filePath": "C:\\Users\\xtaho\\Desktop\\Dev Engine\\contests\\clausepulse\\docs\\screenshots\\05-live-git-diff-audit.png",
-      "bytes": 124969
+      "bytes": 98144
     },
     {
       "fileName": "06-archival-vellum-light-theme.png",
       "filePath": "C:\\Users\\xtaho\\Desktop\\Dev Engine\\contests\\clausepulse\\docs\\screenshots\\06-archival-vellum-light-theme.png",
-      "bytes": 124243
+      "bytes": 102025
     }
   ]
 }

@@ -175,11 +175,19 @@ export function evaluateClauseBuffer(
     totalDwellMs > 0 ? Number(Math.min(1, totalGazeMs / totalDwellMs).toFixed(2)) : 0;
 
   const pulseMean = computeMedian(buffer.pulseSamples) ?? previousRecord.pulseMeanBpm;
+  const recentPulseMean =
+    buffer.pulseSamples.length > 0
+      ? computeMedian(buffer.pulseSamples.slice(-25))
+      : previousRecord.pulseMeanBpm;
   const pulseConf = computeMedian(buffer.pulseConfidences) ?? previousRecord.pulseConfidence;
   const pulseDelta =
     pulseMean !== null && baseline?.pulseMedianBpm != null
       ? Number((pulseMean - baseline.pulseMedianBpm).toFixed(1))
       : null;
+  const recentPulseDelta =
+    recentPulseMean !== null && baseline?.pulseMedianBpm != null
+      ? Number((recentPulseMean - baseline.pulseMedianBpm).toFixed(1))
+      : pulseDelta;
 
   const breathMean = computeMedian(buffer.breathingSamples) ?? previousRecord.breathingMeanBrpm;
   const breathConf = computeMedian(buffer.breathingConfidences) ?? previousRecord.breathingConfidence;
@@ -189,12 +197,12 @@ export function evaluateClauseBuffer(
     baseline?.upperTraceStdDev ?? 0.35,
     false
   );
-  // If the user is re-reading calmly on a subsequent visit and has accumulated >= 25 samples,
+  // Note: If the user is re-reading calmly on a subsequent visit and has accumulated >= 40 samples,
   // evaluate the current visit's apnea rather than permanently locking to an old apnea hold,
   // while keeping historical pass records in `passHistory`.
   const currentVisitApnea = Math.max(buffer.maxApneaHoldSec, apnea.maxHoldSec);
   const maxApneaHoldSec = Number(
-    (buffer.upperTraceSamples.length >= 25 && currentVisitApnea < 3.0
+    (buffer.upperTraceSamples.length >= 40 && currentVisitApnea < 3.0
       ? currentVisitApnea
       : Math.max(previousRecord.maxApneaHoldSec, currentVisitApnea)
     ).toFixed(1)
@@ -241,19 +249,22 @@ export function evaluateClauseBuffer(
     buffer.accumulatedDwellMs > 0
       ? buffer.accumulatedTalkingMs / buffer.accumulatedDwellMs
       : totalDwellMs > 0
-      ? totalTalkingMs / totalDwellMs
-      : 0;
+        ? totalTalkingMs / totalDwellMs
+        : 0;
 
-  // Rule 1: Skim Detection (dwell time below physical reading floor OR eyes off-screen)
-  if (totalDwellMs < clause.minRequiredDwellMs || gazePresenceRatio < 0.55) {
+  const hasApnea = maxApneaHoldSec >= 4.5;
+  const hasPulseSpike =
+    (pulseDelta !== null && pulseConf >= 40 && pulseDelta >= 7.5) ||
+    (recentPulseDelta !== null && pulseConf >= 40 && recentPulseDelta >= 7.5 && totalDwellMs >= 2500);
+  const exprDelta = exprScore - (baseline?.expressionTensionMedian ?? 8.0);
+  const hasOcularStrain = exprDelta >= 22 && blinkRatePerMin < 7.0;
+
+  // Rule 1: Gaze presence floor (must actually look at the clause, even if timer runs long)
+  if (gazePresenceRatio < 0.55 && totalDwellMs >= 1500) {
     status = 'SKIM_DETECTED';
-    const pct = Math.min(100, Math.round((totalDwellMs / clause.minRequiredDwellMs) * 100));
-    statusReason =
-      gazePresenceRatio < 0.55 && totalDwellMs >= 1500
-        ? `Gaze off-screen for ${Math.round((1 - gazePresenceRatio) * 100)}% of dwell window. Re-read with eyes on clause.`
-        : `Skimmed (${(totalDwellMs / 1000).toFixed(1)}s vs ${(clause.minRequiredDwellMs / 1000).toFixed(1)}s minimum for ${clause.wordCount} words — ${pct}% completed).`;
+    statusReason = `Gaze off-screen for ${Math.round((1 - gazePresenceRatio) * 100)}% of dwell window. Re-read with eyes on clause.`;
   }
-  // Rule 2: Model Card Talking / Low-Confidence Gate (never fabricate physiological verdicts during speech/motion)
+  // Rule 2: Model Card Talking / Low-Confidence Gate (checked before stress so vocalization never false-alarms apnea)
   else if (currentBufferTalkingRatio > 0.35 || (buffer.totalPackets >= 5 && signalValidRatio < 0.4)) {
     status = 'SIGNAL_UNVERIFIED';
     statusReason =
@@ -261,21 +272,26 @@ export function evaluateClauseBuffer(
         ? 'Vocalization detected (face.talking = true). SmartSpectra breathing rate is paused during speech per Model Card.'
         : 'Camera framing or lighting unstable during reading window. Hold still with face and upper chest illuminated.';
   }
-  // Rule 3: Reading Apnea / High Autonomic Strain Detection
-  else {
-    const hasApnea = maxApneaHoldSec >= 4.5;
-    const hasPulseSpike = pulseDelta !== null && pulseConf >= 40 && pulseDelta >= 7.5;
-    const exprDelta = exprScore - (baseline?.expressionTensionMedian ?? 8.0);
-    const hasOcularStrain = exprDelta >= 22 && blinkRatePerMin < 7.0;
-
-    if (hasApnea || hasPulseSpike || hasOcularStrain) {
-      status = 'APNEA_FRICTION';
-      const reasons: string[] = [];
-      if (hasApnea) reasons.push(`${maxApneaHoldSec}s breath-hold (reading apnea)`);
-      if (hasPulseSpike) reasons.push(`+${pulseDelta} BPM pulse surge above baseline`);
-      if (hasOcularStrain) reasons.push(`elevated brow tension (+${exprDelta.toFixed(0)}%) with blink suppression`);
-      statusReason = `Physiological friction detected: ${reasons.join(' + ')}. Complete 2 settling breaths to attest.`;
-    }
+  // Rule 3: Reading Apnea / Sustained Autonomic Stress Detection
+  // Triggers immediately when a reader holds their breath >= 4.5s or sustains a sharp sympathetic surge while looking at the clause
+  else if (hasApnea || ((hasPulseSpike || hasOcularStrain) && totalDwellMs >= 2500)) {
+    status = 'APNEA_FRICTION';
+    const displayedPulseDelta =
+      pulseDelta !== null && Math.abs(pulseDelta) >= 7.5 ? pulseDelta : recentPulseDelta ?? pulseDelta;
+    const reasons: string[] = [];
+    if (hasApnea) reasons.push(`${maxApneaHoldSec}s breath-hold (reading apnea)`);
+    if (hasPulseSpike) reasons.push(`+${displayedPulseDelta} BPM pulse surge above baseline`);
+    if (hasOcularStrain) reasons.push(`elevated brow tension (+${exprDelta.toFixed(0)}%) with blink suppression`);
+    statusReason = `Physiological friction detected: ${reasons.join(' + ')}. Complete 2 settling breaths to attest.`;
+  }
+  // Rule 4: Reading Speed Skim Floor (dwell below physical word-count floor)
+  else if (totalDwellMs < clause.minRequiredDwellMs || gazePresenceRatio < 0.55) {
+    status = 'SKIM_DETECTED';
+    const pct = Math.min(100, Math.round((totalDwellMs / clause.minRequiredDwellMs) * 100));
+    statusReason =
+      gazePresenceRatio < 0.55 && totalDwellMs >= 1500
+        ? `Gaze off-screen for ${Math.round((1 - gazePresenceRatio) * 100)}% of dwell window. Re-read with eyes on clause.`
+        : `Skimmed (${(totalDwellMs / 1000).toFixed(1)}s vs ${(clause.minRequiredDwellMs / 1000).toFixed(1)}s minimum for ${clause.wordCount} words — ${pct}% completed).`;
   }
 
   let nextPassHistory = previousRecord.passHistory;
@@ -355,8 +371,8 @@ export function ingestMetricsForActiveClause(
   const breathArr = metrics.breathing?.rate ?? [];
   const validBreaths = !isTalking
     ? breathArr.filter(
-        (b) => b.value >= 5 && b.value <= 40 && (b.confidence === undefined || b.confidence >= 45)
-      )
+      (b) => b.value >= 5 && b.value <= 40 && (b.confidence === undefined || b.confidence >= 45)
+    )
     : [];
 
   const upperArr = metrics.breathing?.upperTrace ?? metrics.breathing?.upper_trace ?? [];
@@ -433,6 +449,7 @@ export function ingestMetricsForActiveClause(
         nowMs,
         false
       );
+
       updatedRecords = {
         ...session.records,
         [session.activeClauseId]: {
