@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="carbon">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' file: blob: mediastream:; worker-src 'self' blob:; connect-src 'self';"
+  />
+  <title>ClausePulse v2.0 — Physiological Contract, Runbook &amp; Git-Diff Auditor (Presage SmartSpectra SDK)</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Mandatory Pre-Session Camera Consent & Data Boundary Modal -->
+  <div id="consentModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="consentTitle">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-badge-row">
+          <span class="badge badge-accent">CONSENT-FIRST BIOMETRIC INSTRUMENT</span>
+          <span class="badge badge-neutral">ON-DEVICE PROCESSING</span>
+        </div>
+        <h2 id="consentTitle">Camera Consent &amp; SmartSpectra Data Boundaries</h2>
+        <p class="modal-subtitle">
+          ClausePulse uses the <strong>Presage SmartSpectra SDK</strong> (`@smartspectra/node-sdk@3.5.0`) and local optical frame analysis to detect unverified skimming and reading apnea on contracts, production runbooks, and local Git diffs.
+        </p>
+      </div>
+
+      <div class="consent-grid">
+        <div class="consent-item">
+          <div class="consent-item-title">01 / 100% Local On-Device Frame Processing</div>
+          <p>
+            Webcam frames are processed locally on your machine to compute respiratory chest traces (`upperTrace`), pulse plethysmography, HRV, and facial landmarks. <strong>No raw video, images, or audio are ever uploaded.</strong>
+          </p>
+        </div>
+        <div class="consent-item">
+          <div class="consent-item-title">02 / Dual-Engine Architecture (SDK + Local Optical)</div>
+          <p>
+            With a Presage API key, ClausePulse runs the native C++ `SmartSpectraSDK` pipeline. Without a key, clicking <strong>Start Live Camera</strong> immediately opens your webcam in <strong>Local Optical Mode</strong> so you can test live with zero setup barriers.
+          </p>
+        </div>
+        <div class="consent-item">
+          <div class="consent-item-title">03 / Strict Non-Medical Scope &amp; Personal Baseline</div>
+          <p>
+            All physiological readings are relative within-session interaction estimates compared against your own stationary calibration. ClausePulse does <strong>not</strong> diagnose, treat, or evaluate any medical condition.
+          </p>
+        </div>
+        <div class="consent-item">
+          <div class="consent-item-title">04 / Instant Revocation &amp; Cryptographic Receipts</div>
+          <p>
+            Stop the camera, blur the preview, or wipe all local receipts and OS-encrypted keys (`safeStorage`) with one click. Exported Read Receipts contain only aggregated clause telemetry and a real RFC 6234 SHA-256 digest.
+          </p>
+        </div>
+      </div>
+
+      <div class="consent-controls">
+        <label class="checkbox-row">
+          <input type="checkbox" id="consentCheckAck" checked />
+          <span>I understand how camera frames are processed locally and consent to session-scoped sensing when I start a sensor.</span>
+        </label>
+        <label class="checkbox-row">
+          <input type="checkbox" id="consentTelemetryToggle" />
+          <span>Opt in to Presage SDK diagnostic telemetry (<code>enableTelemetry: true</code>) — leave unchecked for strict privacy.</span>
+        </label>
+      </div>
+
+      <div class="modal-actions">
+        <button id="btnAcceptConsent" class="btn btn-primary" type="button">
+          Accept Boundaries &amp; Open Workbench
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Custom Document Paste Modal -->
+  <div id="customDocModal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="customDocTitle">
+    <div class="modal-card">
+      <div class="modal-header">
+        <span class="badge badge-neutral">DOCUMENT &amp; SQL PARSER</span>
+        <h2 id="customDocTitle">Paste Custom Contract, SQL Migration, or PR Checklist</h2>
+        <p class="modal-subtitle">
+          Paste any agreement, SQL migration script, or deployment checklist. Separate blocks with blank lines; ClausePulse computes SHA-256 provenance, word counts, minimum comprehension dwell floors, and trap warnings.
+        </p>
+      </div>
+      <div class="form-group">
+        <label for="customDocTitleInput">Document Title</label>
+        <input id="customDocTitleInput" type="text" class="input-text" value="Vendor SaaS Data Processing &amp; Indemnity Addendum" />
+      </div>
+      <div class="form-group">
+        <label for="customDocBodyInput">Document Clauses / SQL Blocks (separate paragraphs with a blank line)</label>
+        <textarea id="customDocBodyInput" class="input-textarea" rows="8">Section 1: Service Availability &amp; Incident Notification
+Provider shall maintain 99.9% monthly uptime across primary API endpoints and notify Customer within 4 hours of any verified security incident affecting customer records.
+
+Section 2: Automatic Renewal &amp; Price Escalation
+This agreement shall auto-renew without notice for successive 24-month terms at a 15% annual rate increase unless Customer delivers written termination via certified mail at least 90 days prior to renewal.
+
+Section 3: Irrevocable Data License &amp; Unlimited Indemnification
+Customer grants Provider an irrevocable, perpetual, worldwide royalty-free license to train commercial foundation models on pre-existing intellectual property and customer payloads, and Customer agrees to indemnify Provider with unlimited liability against all third-party regulatory fines.</textarea>
+      </div>
+      <div class="modal-actions">
+        <button id="btnCancelCustomDoc" class="btn btn-secondary" type="button">Cancel</button>
+        <button id="btnLoadCustomDoc" class="btn btn-primary" type="button">Parse &amp; Load Clauses</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Top Precision Command & Ingestion Bar -->
+  <header class="app-header">
+    <div class="brand-cluster">
+      <div class="brand-mark" aria-hidden="true">CP</div>
+      <div>
+        <div class="brand-title-row">
+          <h1 class="brand-title">ClausePulse</h1>
+          <span class="version-pill" id="sdkVersionBadge">@smartspectra/node-sdk v3.5.0</span>
+          <span class="mode-pill mode-pill-idle" id="activeSourceBadge">IDLE • STANDBY</span>
+        </div>
+        <p class="brand-subtitle">
+          Physiological Reading, Local File &amp; Git-Diff Skim/Apnea Auditor • Presage SmartSpectra SDK
+        </p>
+      </div>
+    </div>
+
+    <div class="header-ingestion-bar">
+      <button id="btnOpenLocalFile" class="btn btn-secondary btn-sm" type="button" title="Open any local .md, .sql, .ts, .json, .txt, or .diff file from disk">
+        📂 Open Local File…
+      </button>
+      <button id="btnScanGitRepo" class="btn btn-secondary btn-sm" type="button" title="Audit live git diff from the current repository">
+        🔀 Audit Workspace Git Diff
+      </button>
+      <button id="btnPickGitFolder" class="btn btn-ghost btn-sm" type="button" title="Pick any local Git repository folder on disk to audit its diff">
+        Pick Repo…
+      </button>
+      <button id="btnJumpToEval" class="btn btn-ghost btn-sm" type="button" title="Run the 30-scenario physiological evaluation benchmark">
+        📊 30-Case Benchmark
+      </button>
+    </div>
+
+    <div class="header-actions">
+      <div class="status-cluster">
+        <span class="status-label">Pipeline:</span>
+        <span id="sdkStatusBadge" class="status-pill status-idle">Standby</span>
+      </div>
+      <button id="btnOpenConsentModal" class="btn btn-ghost btn-sm" type="button">
+        Privacy
+      </button>
+      <button id="btnToggleTheme" class="btn btn-ghost btn-sm" type="button">
+        Theme: Carbon
+      </button>
+    </div>
+  </header>
+
+  <!-- Main 3-Column Instrument Workbench -->
+  <main class="workbench-grid">
+    <!-- LEFT COLUMN: SmartSpectra Optical Sensor Rack & Dual Oscilloscope -->
+    <section class="panel panel-left" aria-label="SmartSpectra Optical Sensor Rack">
+      <div class="panel-header">
+        <h2>01 / Optical Sensor &amp; ROI Lock</h2>
+        <div class="inline-controls">
+          <label class="toggle-mini" title="Blur video preview on screen while keeping local frame analysis active">
+            <input type="checkbox" id="chkBlurPreview" />
+            <span>Blur Video</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Camera Preview Frame + Live HUD Reticle Canvas -->
+      <div class="camera-stage" id="cameraStage">
+        <video id="cameraPreview" autoplay muted playsinline></video>
+        <canvas id="cameraHudCanvas" width="336" height="186"></canvas>
+        <div class="camera-overlay" id="cameraOverlay">
+          <span class="camera-overlay-title" id="cameraOverlayTitle">Optical Sensor Standby</span>
+          <span class="camera-overlay-sub" id="cameraOverlaySub">
+            Click "Start Live Camera" for real-time webcam sensing (SmartSpectra C++ SDK or Local Optical ROI), load a Video File, or run the Replay Bench.
+          </span>
+        </div>
+        <div class="camera-hud-top">
+          <span class="hud-chip" id="hudValidationChip">Validation: Standby</span>
+          <span class="hud-chip" id="hudTalkingChip">Speech Gate: Silent</span>
+        </div>
+      </div>
+
+      <!-- Primary Hardware Controls -->
+      <div class="sensor-button-row">
+        <button id="btnStartCamera" class="btn btn-primary" type="button" title="Opens your webcam via SmartSpectra SDK (if key set) or Live Local Optical ROI">
+          Start Live Camera
+        </button>
+        <button id="btnRecordTake" class="btn btn-secondary" type="button" disabled title="Record a 12-second webcam video take (.webm) to disk for SDK useFile() analysis">
+          ● Rec Take
+        </button>
+        <button id="btnRunVideoFile" class="btn btn-secondary" type="button" title="Analyze any .mp4/.webm/.mov video file">
+          Video File
+        </button>
+        <button id="btnStopSensor" class="btn btn-danger" type="button" disabled>
+          Stop
+        </button>
+      </div>
+
+      <!-- Notice / Diagnostic Banner -->
+      <div id="sensorNoticeBanner" class="notice-banner" hidden>
+        <strong id="sensorNoticeTitle">Notice:</strong>
+        <span id="sensorNoticeText"></span>
+      </div>
+
+      <!-- Dual-Channel Real-Time Hardware Oscilloscope -->
+      <div class="scope-card">
+        <div class="scope-header">
+          <span>CH1: Chest Resp Trace (<code>upperTrace</code>)</span>
+          <span id="apneaReadoutBadge" class="scope-badge">Breath Hold: 0.0s</span>
+        </div>
+        <canvas id="canvasBreathingTrace" width="336" height="66"></canvas>
+
+        <div class="scope-header scope-header-second">
+          <span>CH2: Arterial Pleth (<code>arterialPressureTrace</code>)</span>
+          <span id="pulseConfBadge" class="scope-badge">Conf: —</span>
+        </div>
+        <canvas id="canvasPulseTrace" width="336" height="66"></canvas>
+      </div>
+
+      <!-- Tabular Vitals Matrix -->
+      <div class="vitals-grid">
+        <div class="vital-cell">
+          <span class="vital-label">Pulse Rate</span>
+          <div class="vital-value-row">
+            <span class="vital-value" id="valPulseBpm">—</span>
+            <span class="vital-unit">BPM</span>
+          </div>
+          <span class="vital-sub" id="subPulseDelta">Baseline: uncalibrated</span>
+        </div>
+
+        <div class="vital-cell">
+          <span class="vital-label">Breathing Rate</span>
+          <div class="vital-value-row">
+            <span class="vital-value" id="valBreathingBrpm">—</span>
+            <span class="vital-unit">BR/min</span>
+          </div>
+          <span class="vital-sub" id="subBreathingConf">30s rolling window</span>
+        </div>
+
+        <div class="vital-cell">
+          <span class="vital-label">Blink &amp; Gaze ROI</span>
+          <div class="vital-value-row">
+            <span class="vital-value" id="valBlinkRate">—</span>
+            <span class="vital-unit">/min</span>
+          </div>
+          <span class="vital-sub" id="subGazeStatus">Landmarks: 0 pts</span>
+        </div>
+
+        <div class="vital-cell">
+          <span class="vital-label">HRV &amp; Strain</span>
+          <div class="vital-value-row">
+            <span class="vital-value" id="valHrvRmssd">—</span>
+            <span class="vital-unit">ms</span>
+          </div>
+          <span class="vital-sub" id="subExpressionTension">Brow tension: 0%</span>
+        </div>
+      </div>
+
+      <!-- 30-Second Personal Baseline Calibrator -->
+      <div class="baseline-card">
+        <div class="baseline-header">
+          <div>
+            <h3>02 / Personal Baseline Reference</h3>
+            <p class="baseline-desc" id="baselineStatusText">
+              Calibrates your stationary resting BPM, breathing SD, and blink rate so deltas are personal, not population guesses.
+            </p>
+          </div>
+          <button id="btnStartBaseline" class="btn btn-secondary btn-sm" type="button">
+            Calibrate
+          </button>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill" id="baselineProgressFill" style="width: 0%"></div>
+        </div>
+      </div>
+
+      <!-- SDK Metric Bundle Toggles -->
+      <div class="bundle-card">
+        <div class="bundle-title">03 / Active SmartSpectra Metric Bundles</div>
+        <div class="bundle-toggles">
+          <label class="bundle-chip">
+            <input type="checkbox" id="chkBundleBreathing" checked disabled />
+            <span>Breathing</span>
+          </label>
+          <label class="bundle-chip">
+            <input type="checkbox" id="chkBundleFace" checked />
+            <span>Face (Landmarks/Speech)</span>
+          </label>
+          <label class="bundle-chip">
+            <input type="checkbox" id="chkBundleCardio" checked />
+            <span>Cardio (Pulse/HRV)</span>
+          </label>
+          <label class="bundle-chip">
+            <input type="checkbox" id="chkBundleEda" />
+            <span>EDA Trace</span>
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <!-- CENTER COLUMN: Editorial Clause & Git-Diff Reader Canvas -->
+    <section class="panel panel-center" aria-label="Document Clause and Git Diff Auditor">
+      <div class="reader-toolbar">
+        <div class="doc-selector-group">
+          <label for="selectDocumentPreset" class="sr-only">Select Document or Loaded File</label>
+          <select id="selectDocumentPreset" class="select-input">
+            <option value="freelance-msa-2026">Contract: Independent Contractor MSA (2 Buried IP/Liability Traps)</option>
+            <option value="prod-cutover-runbook">Runbook: PostgreSQL 17 Primary Cutover Checklist (Destructive SQL)</option>
+            <option value="biometric-study-consent">Consent: Biometric Optical Sensor Research Protocol</option>
+          </select>
+          <button id="btnOpenCustomDoc" class="btn btn-ghost btn-sm" type="button">
+            + Paste Text
+          </button>
+        </div>
+
+        <div class="reader-nav-group">
+          <button id="btnPrevClause" class="btn btn-ghost btn-sm" type="button">← Prev</button>
+          <span id="clauseStepIndicator" class="step-indicator">Clause 1 of 5</span>
+          <button id="btnNextClause" class="btn btn-secondary btn-sm" type="button">Next →</button>
+        </div>
+      </div>
+
+      <!-- Document Provenance & SHA-256 Header -->
+      <div class="doc-meta-banner" id="docMetaBanner">
+        <div class="doc-meta-left">
+          <h2 id="docTitleHeading">Independent Contractor Master Services Agreement (MSA)</h2>
+          <div class="doc-provenance-row">
+            <span id="docSubtitleText">Acme Cloud Ventures Inc. — Q4 Engineering Engagement</span>
+            <span class="hash-pill" id="docSourceHashBadge">SHA-256: —</span>
+          </div>
+        </div>
+        <div class="doc-summary-pills">
+          <span class="summary-pill pill-verified" id="pillVerifiedCount">0 Verified</span>
+          <span class="summary-pill pill-skim" id="pillSkimCount">0 Skimmed</span>
+          <span class="summary-pill pill-friction" id="pillFrictionCount">0 Friction</span>
+        </div>
+      </div>
+
+      <!-- Interactive Biometric Heatmap Minimap Strip -->
+      <div class="minimap-container">
+        <div class="minimap-label-row">
+          <span>CLAUSE &amp; HUNK BIOMETRIC HEATMAP TIMELINE (CLICK ANY SEGMENT TO JUMP)</span>
+          <span id="minimapCompletionLabel">0% Attested</span>
+        </div>
+        <div id="clauseMinimapBar" class="minimap-bar" role="navigation" aria-label="Clause Heatmap Timeline"></div>
+      </div>
+
+      <!-- Interactive SignSteady Respiratory Settling Gate -->
+      <div id="settlingGateBanner" class="settling-gate" hidden>
+        <div class="settling-gate-header">
+          <div>
+            <span class="badge badge-danger">SIGNSTEADY RESPIRATORY SETTLING GATE ACTIVE</span>
+            <h3 id="settlingGateTitle">Complete 2 Coherent Breaths to Unlock High-Friction Clause</h3>
+            <p id="settlingGateDesc">
+              Follow the inhale/exhale pacer below with your chest in frame. ClausePulse verifies 2 full respiratory cycles directly from your live <code>breathing.upperTrace</code> waveform and records Pass 2 for side-by-side comparison.
+            </p>
+          </div>
+          <div class="settling-counter">
+            <span id="settlingCyclesVal">0 / 2</span>
+            <small>Verified Breaths</small>
+          </div>
+        </div>
+        <div class="settling-pacer-track">
+          <div id="settlingPacerOrb" class="settling-pacer-orb"></div>
+          <span id="settlingPacerInstruction" class="settling-pacer-label">Inhale slowly through your nose… then exhale completely.</span>
+        </div>
+      </div>
+
+      <!-- Clause / Diff List Container -->
+      <div id="clauseListContainer" class="clause-list" role="region" aria-label="Audited Clauses and Diff Hunks">
+        <!-- Populated dynamically by src/renderer/app.ts -->
+      </div>
+    </section>
+
+    <!-- RIGHT COLUMN: Cryptographic Receipt, 30-Case Benchmark, Replay Bench, & Key Vault -->
+    <aside class="panel panel-right" aria-label="Audit Receipt, Benchmark, Replay Bench, and Key Vault">
+      <div class="tab-bar" role="tablist">
+        <button class="tab-btn active" data-tab="tabReceipt" role="tab" aria-selected="true" type="button">
+          Receipt &amp; Git
+        </button>
+        <button class="tab-btn" data-tab="tabEval" role="tab" aria-selected="false" type="button">
+          30-Case Eval
+        </button>
+        <button class="tab-btn" data-tab="tabTestBench" role="tab" aria-selected="false" type="button">
+          Replay Bench
+        </button>
+        <button class="tab-btn" data-tab="tabVault" role="tab" aria-selected="false" type="button">
+          Key Vault
+        </button>
+      </div>
+
+      <!-- TAB 1: Cryptographic Read Receipt & Git Commit Trailer -->
+      <div id="tabReceipt" class="tab-pane active" role="tabpanel">
+        <div class="attest-card">
+          <div class="attest-status-row">
+            <span class="attest-label">Document Sign-Off Gate</span>
+            <span id="signOffVerdictBadge" class="badge badge-warn">BLOCKED (UNREAD CLAUSES)</span>
+          </div>
+          <p id="signOffExplanation" class="attest-desc">
+            Every clause or diff hunk must be read with eyes centered for its minimum comprehension dwell floor, and any clause triggering reading apnea or pulse surge must be settled.
+          </p>
+          <div class="attest-actions">
+            <button id="btnFinalizeClause" class="btn btn-secondary btn-sm" type="button">
+              Verify Current Clause
+            </button>
+            <button id="btnAttestDocument" class="btn btn-primary btn-sm" type="button" disabled>
+              Attest &amp; Sign SHA-256 Receipt
+            </button>
+          </div>
+        </div>
+
+        <div class="git-trailer-box">
+          <div class="git-trailer-header">
+            <span>Git Commit / PR Attestation Trailer (RFC 6234 SHA-256)</span>
+            <button id="btnCopyGitTrailer" class="btn btn-ghost btn-xs" type="button">Copy Trailer</button>
+          </div>
+          <code id="gitTrailerCode">Attested-By-ClausePulse: INCOMPLETE</code>
+        </div>
+
+        <div class="receipt-preview-header">
+          <h3>Live Physiological Read Receipt</h3>
+          <div class="inline-controls">
+            <button id="btnCopyReceiptMd" class="btn btn-ghost btn-xs" type="button">Copy .MD</button>
+            <button id="btnExportReceiptFile" class="btn btn-secondary btn-xs" type="button">Export File…</button>
+          </div>
+        </div>
+        <pre id="receiptMarkdownPreview" class="receipt-code-box"></pre>
+      </div>
+
+      <!-- TAB 2: 30-Scenario Quantitative Evaluation & Ablation Benchmark -->
+      <div id="tabEval" class="tab-pane" role="tabpanel" hidden>
+        <div class="bench-banner">
+          <div class="eval-header-row">
+            <span class="badge badge-accent">REPRODUCIBLE ABLATION BENCHMARK</span>
+            <button id="btnRunEvalSuite" class="btn btn-primary btn-xs" type="button">
+              ▶ Re-Run 30 Scenarios
+            </button>
+          </div>
+          <p>
+            Compares <strong>ClausePulse Multi-Signal Fusion</strong> against <strong>Baseline A (Naive Dwell Timer)</strong> and <strong>Baseline B (Uncalibrated 80-BPM Pulse Gate)</strong> across 30 physiological reading, skimming, speech-interference, and boundary edge cases.
+          </p>
+        </div>
+
+        <div id="evalScoreboardGrid" class="eval-scoreboard">
+          <!-- Populated by renderEvaluationBenchmark() -->
+        </div>
+
+        <div id="evalBoundaryBox" class="eval-boundary-box">
+          <!-- Honest failure boundaries E29 & E30 -->
+        </div>
+
+        <div class="eval-table-wrap">
+          <table class="eval-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Scenario</th>
+                <th>Expected</th>
+                <th>Timer</th>
+                <th>RawHR</th>
+                <th>ClausePulse</th>
+              </tr>
+            </thead>
+            <tbody id="evalTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- TAB 3: Deterministic Signal Replay Bench (Explicitly Labeled Test Mode) -->
+      <div id="tabTestBench" class="tab-pane" role="tabpanel" hidden>
+        <div class="bench-banner">
+          <span class="badge badge-neutral">DETERMINISTIC TEST FIXTURE REPLAY</span>
+          <p>
+            Explicitly labeled test bench for headless verification and offline inspection. Streams <code>DecodedSmartSpectraMetrics</code> time-slices through the exact same mathematical engine with <strong>zero hardcoded state mutations</strong>.
+          </p>
+        </div>
+
+        <div class="bench-section">
+          <h4>Guided Multi-Pass Verification Walkthrough</h4>
+          <p class="bench-sub">
+            Streams real packet sequences at 20x simulation speed across the active document: calibrates baseline, verifies Clause 1 calmly, triggers Skim Lock on Clause 2, triggers Reading Apnea + Pulse Surge on Clause 3, unlocks the SignSteady Respiratory Gate (recording Pass 1 vs. Pass 2 Ghost Comparison), and verifies remaining clauses.
+          </p>
+          <button id="btnRunAutoWalkthrough" class="btn btn-primary btn-block" type="button">
+            ▶ Run Packet-Driven Verification Walkthrough
+          </button>
+        </div>
+
+        <div class="bench-section">
+          <h4>Manual Signal Profile Injector (10 Hz Stream)</h4>
+          <div class="profile-grid">
+            <button class="btn btn-secondary btn-sm profile-btn" data-profile="CALM_STEADY_READER" type="button">
+              1. Calm Steady Reader (70 BPM, 14 BRPM, Centered Gaze)
+            </button>
+            <button class="btn btn-secondary btn-sm profile-btn" data-profile="APNEA_AND_PULSE_SPIKE" type="button">
+              2. Reading Apnea + Pulse Surge (Breath Flatline + 84 BPM)
+            </button>
+            <button class="btn btn-secondary btn-sm profile-btn" data-profile="OFF_SCREEN_SKIMMER" type="button">
+              3. Off-Screen Skimmer (Gaze Landmarks Out of Frame)
+            </button>
+            <button class="btn btn-secondary btn-sm profile-btn" data-profile="TALKING_ALOUD_PAUSE" type="button">
+              4. Talking Aloud (Triggers Model Card Speech Gate)
+            </button>
+            <button class="btn btn-secondary btn-sm profile-btn" data-profile="COHERENT_SETTLING_BREATH" type="button">
+              5. Deep Coherent Breathing (Unlocks SignSteady Gate)
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 4: API Key Vault, Device Readiness & Privacy Controls -->
+      <div id="tabVault" class="tab-pane" role="tabpanel" hidden>
+        <div class="vault-section">
+          <h4>Presage SmartSpectra API Key Vault</h4>
+          <p class="bench-sub">
+            Encrypted locally via Electron OS <code>safeStorage</code> or read from <code>.env</code> (<code>SMARTSPECTRA_API_KEY</code>). When configured, <strong>Start Live Camera</strong> uses the native C++ <code>SmartSpectraSDK</code>; when empty, it automatically uses <strong>Live Webcam Optical Mode</strong>.
+          </p>
+          <div class="vault-status-line">
+            <span>Active Key Status:</span>
+            <strong id="vaultKeyStatusText">Checking…</strong>
+          </div>
+          <div class="vault-input-row">
+            <input id="inputApiKey" type="password" class="input-text" placeholder="Paste Presage API Key from physiology.presagetech.com" />
+            <button id="btnSaveApiKey" class="btn btn-primary btn-sm" type="button">Save Key</button>
+          </div>
+          <div class="vault-actions-row">
+            <button id="btnForgetApiKey" class="btn btn-ghost btn-xs" type="button">Forget Stored Key</button>
+            <button id="btnCheckReadiness" class="btn btn-secondary btn-xs" type="button">Run SDK Device Readiness</button>
+          </div>
+          <div id="readinessResultBox" class="readiness-box" hidden></div>
+        </div>
+
+        <div class="vault-section">
+          <h4>Consent, Telemetry &amp; Data Deletion</h4>
+          <label class="checkbox-row">
+            <input type="checkbox" id="vaultTelemetryToggle" />
+            <span>Enable SmartSpectra SDK Telemetry (<code>enableTelemetry</code>)</span>
+          </label>
+          <p class="bench-sub">
+            When unchecked (default), <code>enableTelemetry: false</code> is passed to <code>SmartSpectraSDK</code>.
+          </p>
+          <button id="btnWipeAllData" class="btn btn-danger btn-sm btn-block" type="button">
+            Wipe All Local Receipts, Recorded Takes &amp; Stored Key
+          </button>
+        </div>
+
+        <div class="vault-section">
+          <h4>Saved Local Read Receipts (<span id="savedReceiptsCount">0</span>)</h4>
+          <div id="savedReceiptsList" class="saved-receipts-list">
+            <p class="bench-sub">No receipts saved yet in this session.</p>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <script src="dist/renderer.js"></script>
+</body>
+</html>

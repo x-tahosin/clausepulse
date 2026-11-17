@@ -1,0 +1,39 @@
+{
+  "name": "clausepulse",
+  "version": "2.0.0",
+  "private": false,
+  "description": "Consent-first desktop reading, local file, and Git-diff physiological skim/apnea auditor powered by the Presage SmartSpectra SDK.",
+  "author": "Tahosin (https://github.com/x-tahosin)",
+  "license": "MIT",
+  "homepage": "https://x-tahosin.github.io/clausepulse/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/x-tahosin/clausepulse.git"
+  },
+  "bugs": {
+    "url": "https://github.com/x-tahosin/clausepulse/issues"
+  },
+  "main": "dist/main.js",
+  "scripts": {
+    "build:main": "esbuild src/main/main.ts --bundle --platform=node --target=node20 --external:electron --external:@smartspectra/node-sdk --external:@smartspectra/node-sdk/* --outfile=dist/main.js",
+    "build:preload": "esbuild src/main/preload.ts --bundle --platform=node --target=node20 --external:electron --external:@smartspectra/node-sdk --external:@smartspectra/node-sdk/* --outfile=dist/preload.js",
+    "build:renderer": "esbuild src/renderer/app.ts --bundle --platform=browser --target=chrome128 --format=iife --outfile=dist/renderer.js",
+    "build": "npm run build:main && npm run build:preload && npm run build:renderer",
+    "typecheck": "tsc --noEmit",
+    "start": "npm run build && electron .",
+    "smoke": "npm run build && electron . --smoke-test",
+    "verify:e2e": "npm run build && electron . --e2e-verify",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@smartspectra/node-sdk": "^3.5.0",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "electron": "^34.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
